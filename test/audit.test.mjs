@@ -1,9 +1,21 @@
 import assert from "node:assert/strict";
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { describe, it } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
+  auditRepositories,
   buildAuditRow,
   defaultSelection,
+  DEFAULT_DISCOVERY_MAX_DEPTH,
+  discoverRepositoryRoots,
   groupChatThreadsByCwd,
   matchPullRequest,
   measureWorktreeSizes,
@@ -100,6 +112,71 @@ detached
       repositoryFromRemote("https://github.com/The-JW-Corp/Invisible"),
       "The-JW-Corp/Invisible",
     );
+  });
+
+  it("discovers nested repositories and deduplicates linked worktrees", async () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "worktree-audit-discovery-")),
+    );
+    const repoA = join(root, "repo-a");
+    const repoAWorktree = join(root, "repo-a-worktree");
+    const repoB = join(root, "nested", "repo-b");
+    const ignoredRepo = join(repoA, "node_modules", "ignored-repo");
+    mkdirSync(join(repoA, ".git"), { recursive: true });
+    mkdirSync(repoAWorktree, { recursive: true });
+    writeFileSync(join(repoAWorktree, ".git"), "gitdir: ../repo-a/.git");
+    mkdirSync(join(repoB, ".git"), { recursive: true });
+    mkdirSync(join(ignoredRepo, ".git"), { recursive: true });
+
+    const metadata = new Map([
+      [repoA, { repoRoot: repoA, commonDir: join(repoA, ".git") }],
+      [repoAWorktree, { repoRoot: repoA, commonDir: join(repoA, ".git") }],
+      [repoB, { repoRoot: repoB, commonDir: join(repoB, ".git") }],
+      [
+        ignoredRepo,
+        { repoRoot: ignoredRepo, commonDir: join(ignoredRepo, ".git") },
+      ],
+    ]);
+    const runCommand = (_command, args) => {
+      const candidate = metadata.get(args[1]);
+      if (!candidate) return { status: 1, stdout: "", stderr: "not a repo" };
+      return {
+        status: 0,
+        stdout: args.includes("--show-toplevel")
+          ? `${candidate.repoRoot}\n`
+          : `${candidate.commonDir}\n`,
+        stderr: "",
+      };
+    };
+
+    try {
+      const discovery = discoverRepositoryRoots(root, { runCommand });
+      assert.deepEqual(discovery.roots, [repoA, repoB].sort());
+      assert.deepEqual(discovery.errors, []);
+
+      const aggregate = await auditRepositories({
+        root,
+        runCommand,
+        noGithub: true,
+        noChat: true,
+        auditRepository: async ({ cwd }) => ({
+          repoRoot: cwd,
+          repository: null,
+          rows: [{ path: join(cwd, "worktree"), decision: "UNKNOWN" }],
+        }),
+      });
+      assert.deepEqual(
+        aggregate.repositories.map((repository) => repository.repoRoot),
+        [repoA, repoB].sort(),
+      );
+      assert.deepEqual(
+        aggregate.rows.map((row) => row.repoRoot),
+        [repoA, repoB].sort(),
+      );
+      assert.deepEqual(aggregate.errors, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("does not select a dirty or active worktree for removal", () => {
@@ -207,6 +284,8 @@ detached
       parseArgs(["--interactive", "--merged-only", "--cwd", "/tmp/repo"]),
       {
         cwd: "/tmp/repo",
+        root: null,
+        maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
         json: false,
         interactive: true,
         mergedOnly: true,
@@ -214,6 +293,24 @@ detached
         noChat: false,
         deepProcessScan: false,
       },
+    );
+    assert.deepEqual(
+      parseArgs(["--root", "/tmp/projects", "--max-depth", "3"]),
+      {
+        cwd: process.cwd(),
+        root: "/tmp/projects",
+        maxDepth: 3,
+        json: false,
+        interactive: false,
+        mergedOnly: false,
+        noGithub: false,
+        noChat: false,
+        deepProcessScan: false,
+      },
+    );
+    assert.throws(
+      () => parseArgs(["--cwd", "/tmp/repo", "--root", "/tmp/projects"]),
+      /Utilise --cwd ou --root, pas les deux/u,
     );
   });
 
@@ -284,6 +381,75 @@ detached
     assert.deepEqual(calls, [
       { repoRoot: "/repo", path: row.path, head: row.head },
       { repoRoot: "/repo", path: row.path, removed: true },
+    ]);
+  });
+
+  it("uses each repository root when deleting from an aggregate audit", async () => {
+    const firstRow = buildAuditRow({
+      state: state({ path: "/tmp/repo-a-worktree" }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo-a",
+    });
+    const secondRow = buildAuditRow({
+      state: state({ path: "/tmp/repo-b-worktree", branch: "rami/feature-b" }),
+      pr: {
+        kind: "MERGED_EXACT",
+        pullRequest: pullRequest({ headRefName: "rami/feature-b" }),
+      },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo-b",
+    });
+    const rows = [
+      { ...firstRow, repoRoot: "/repo-a" },
+      { ...secondRow, repoRoot: "/repo-b" },
+    ];
+    const calls = [];
+    const result = await executeDeletion({
+      audit: { root: "/workspace", rows },
+      paths: rows.map((row) => row.path),
+      args: {
+        cwd: process.cwd(),
+        root: "/workspace",
+        maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
+        noGithub: true,
+        noChat: true,
+      },
+      output: { write() {} },
+      errorOutput: { write() {} },
+      rootAuditFn: async () => ({ root: "/workspace", rows }),
+      verifyFn({ repoRoot, row }) {
+        calls.push({ action: "verify", repoRoot, path: row.path });
+        return true;
+      },
+      removeFn({ repoRoot, path }) {
+        calls.push({ action: "remove", repoRoot, path });
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    assert.equal(result.removed, 2);
+    assert.deepEqual(calls, [
+      {
+        action: "verify",
+        repoRoot: "/repo-a",
+        path: "/tmp/repo-a-worktree",
+      },
+      {
+        action: "remove",
+        repoRoot: "/repo-a",
+        path: "/tmp/repo-a-worktree",
+      },
+      {
+        action: "verify",
+        repoRoot: "/repo-b",
+        path: "/tmp/repo-b-worktree",
+      },
+      {
+        action: "remove",
+        repoRoot: "/repo-b",
+        path: "/tmp/repo-b-worktree",
+      },
     ]);
   });
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 const COMMAND_TIMEOUT_MS = 10_000;
 const CHAT_QUERY_TIMEOUT_MS = 5_000;
@@ -35,6 +35,20 @@ export const DECISIONS = Object.freeze({
 const ANSI_RESET = "\u001b[0m";
 const ANSI_BOLD = "\u001b[1m";
 const MAX_PATH_DISPLAY_LENGTH = 52;
+export const DEFAULT_DISCOVERY_MAX_DEPTH = 8;
+const DISCOVERY_DIRECTORY_IGNORES = new Set([
+  ".cache",
+  ".git",
+  ".next",
+  ".turbo",
+  ".venv",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "target",
+  "vendor",
+]);
 const DECISION_LABELS = Object.freeze({
   [DECISIONS.REMOVE_CANDIDATE]: "SAFE",
   [DECISIONS.KEEP_MAIN]: "MAIN",
@@ -91,6 +105,8 @@ function nonEmptyLines(value) {
 export function parseArgs(argv = []) {
   const args = {
     cwd: process.cwd(),
+    root: null,
+    maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
     json: false,
     interactive: false,
     mergedOnly: false,
@@ -98,11 +114,25 @@ export function parseArgs(argv = []) {
     noChat: false,
     deepProcessScan: false,
   };
+  let cwdWasProvided = false;
+  let rootWasProvided = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--cwd") {
+      cwdWasProvided = true;
       args.cwd = resolve(argv[++index] ?? "");
+    } else if (argument === "--root" || argument === "--repos-dir") {
+      rootWasProvided = true;
+      args.root = resolve(argv[++index] ?? "");
+    } else if (argument === "--max-depth") {
+      const value = Number.parseInt(argv[++index] ?? "", 10);
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(
+          "--max-depth nécessite un entier supérieur ou égal à zéro.",
+        );
+      }
+      args.maxDepth = value;
     } else if (argument === "--json") {
       args.json = true;
     } else if (argument === "--interactive" || argument === "-i") {
@@ -124,6 +154,9 @@ export function parseArgs(argv = []) {
     }
   }
 
+  if (cwdWasProvided && rootWasProvided) {
+    throw new Error("Utilise --cwd ou --root, pas les deux.");
+  }
   if (args.json) {
     args.interactive = false;
   }
@@ -158,6 +191,130 @@ export function parseWorktreeList(output) {
 
   if (current) worktrees.push(current);
   return worktrees.filter((worktree) => !worktree.bare);
+}
+
+function safeRealPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function discoveryError(path, error) {
+  return {
+    path,
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function repositoryMetadata(candidatePath, runCommand) {
+  const topLevel = runCommand("git", [
+    "-C",
+    candidatePath,
+    "rev-parse",
+    "--show-toplevel",
+  ]);
+  if (topLevel.status !== 0) return null;
+
+  const commonDirectory = runCommand("git", [
+    "-C",
+    candidatePath,
+    "rev-parse",
+    "--git-common-dir",
+  ]);
+  const repoRoot = safeRealPath(topLevel.stdout.trim());
+  const commonDir =
+    commonDirectory.status === 0 && commonDirectory.stdout.trim().length > 0
+      ? safeRealPath(resolve(candidatePath, commonDirectory.stdout.trim()))
+      : repoRoot;
+  return { repoRoot, commonDir };
+}
+
+export function discoverRepositoryRoots(
+  root,
+  { runCommand = commandResult, maxDepth = DEFAULT_DISCOVERY_MAX_DEPTH } = {},
+) {
+  const absoluteRoot = safeRealPath(root);
+  if (!existsSync(absoluteRoot)) {
+    throw new Error(`Le dossier racine n'existe pas: ${absoluteRoot}`);
+  }
+  if (!lstatSync(absoluteRoot).isDirectory()) {
+    throw new Error(`La racine doit être un dossier: ${absoluteRoot}`);
+  }
+
+  const candidates = [];
+  const errors = [];
+  const visitedDirectories = new Set();
+  const walk = (directory, depth) => {
+    const realDirectory = safeRealPath(directory);
+    if (visitedDirectories.has(realDirectory)) return;
+    visitedDirectories.add(realDirectory);
+
+    const gitMarker = join(realDirectory, ".git");
+    try {
+      const markerStat = lstatSync(gitMarker);
+      if (markerStat.isDirectory() || markerStat.isFile()) {
+        candidates.push({
+          path: realDirectory,
+          hasGitDirectory: markerStat.isDirectory(),
+        });
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT")
+        errors.push(discoveryError(gitMarker, error));
+    }
+
+    if (depth >= maxDepth) return;
+    let entries;
+    try {
+      entries = readdirSync(realDirectory, { withFileTypes: true });
+    } catch (error) {
+      errors.push(discoveryError(realDirectory, error));
+      return;
+    }
+    for (const entry of entries) {
+      if (
+        !entry.isDirectory() ||
+        entry.isSymbolicLink() ||
+        DISCOVERY_DIRECTORY_IGNORES.has(entry.name)
+      ) {
+        continue;
+      }
+      walk(join(realDirectory, entry.name), depth + 1);
+    }
+  };
+
+  walk(absoluteRoot, 0);
+  const repositoriesByCommonDirectory = new Map();
+  for (const candidate of candidates.sort((left, right) =>
+    left.path.localeCompare(right.path),
+  )) {
+    const metadata = repositoryMetadata(candidate.path, runCommand);
+    if (!metadata) {
+      errors.push({
+        path: candidate.path,
+        message: "Le marqueur Git ne permet pas de résoudre le dépôt.",
+      });
+      continue;
+    }
+    const key = metadata.commonDir;
+    const current = repositoriesByCommonDirectory.get(key);
+    if (!current || (candidate.hasGitDirectory && !current.hasGitDirectory)) {
+      repositoriesByCommonDirectory.set(key, {
+        ...metadata,
+        hasGitDirectory: candidate.hasGitDirectory,
+      });
+    }
+  }
+
+  return {
+    root: absoluteRoot,
+    roots: [...repositoriesByCommonDirectory.values()]
+      .map(({ repoRoot }) => repoRoot)
+      .sort((left, right) => left.localeCompare(right)),
+    errors,
+  };
 }
 
 function scanProcessCwds(runCommand) {
@@ -710,6 +867,62 @@ export async function auditWorktrees({
   return { repoRoot, repository, rows };
 }
 
+export async function auditRepositories({
+  root = process.cwd(),
+  runCommand = commandResult,
+  auditRepository = auditWorktrees,
+  maxDepth = DEFAULT_DISCOVERY_MAX_DEPTH,
+  chatLookup,
+  noGithub = false,
+  noChat = false,
+  deepProcessScan = false,
+  onProgress = () => {},
+} = {}) {
+  const discovery = discoverRepositoryRoots(root, { runCommand, maxDepth });
+  const repositories = [];
+  const errors = discovery.errors.map((error) => ({
+    stage: "discovery",
+    ...error,
+  }));
+
+  for (let index = 0; index < discovery.roots.length; index += 1) {
+    const repoRoot = discovery.roots[index];
+    try {
+      const audit = await auditRepository({
+        cwd: repoRoot,
+        runCommand,
+        chatLookup,
+        noGithub,
+        noChat,
+        deepProcessScan,
+        onProgress: (progress) =>
+          onProgress({
+            ...progress,
+            repositoryIndex: index + 1,
+            repositoryTotal: discovery.roots.length,
+            repositoryRoot: repoRoot,
+          }),
+      });
+      repositories.push(audit);
+    } catch (error) {
+      errors.push({
+        stage: "audit",
+        path: repoRoot,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const rows = repositories.flatMap((audit) =>
+    audit.rows.map((row) => ({
+      ...row,
+      repoRoot: audit.repoRoot,
+      repository: audit.repository,
+    })),
+  );
+  return { root: discovery.root, repositories, rows, errors };
+}
+
 export function defaultSelection(rows) {
   return new Set(
     rows
@@ -801,16 +1014,17 @@ function auditSummary(rows) {
 }
 
 function compactAuditLine(row) {
-  return `${row.marker} ${row.size.padStart(9)} ${decisionLabel(row.decision).padEnd(7)} ${shortenText(row.path, MAX_PATH_DISPLAY_LENGTH)} · ${shortenText(pullRequestLabel(row), 22)} · 💬 ${shortenText(chatLabel(row), 28)} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}`;
+  const repositoryLabel = row.repository ?? row.repoRoot;
+  const scope = repositoryLabel ? `[${shortenText(repositoryLabel, 28)}] ` : "";
+  return `${row.marker} ${row.size.padStart(9)} ${decisionLabel(row.decision).padEnd(7)} ${scope}${shortenText(row.path, MAX_PATH_DISPLAY_LENGTH)} · ${shortenText(pullRequestLabel(row), 22)} · 💬 ${shortenText(chatLabel(row), 28)} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}`;
 }
 
 export function renderAudit(audit, { color = process.stdout.isTTY } = {}) {
+  const title = audit.root
+    ? `workspace: ${audit.root}`
+    : (audit.repository ?? "dépôt Git local");
   const lines = [
-    colorize(
-      `\n💾 Worktree audit: ${audit.repository ?? "dépôt Git local"}`,
-      "bold",
-      color,
-    ),
+    colorize(`\n💾 Worktree audit: ${title}`, "bold", color),
     auditSummary(audit.rows),
     "",
   ];
@@ -821,5 +1035,12 @@ export function renderAudit(audit, { color = process.stdout.isTTY } = {}) {
     "",
     "🟢 SAFE | 🟡 REVIEW | 🔴 KEEP | ⚪ UNKNOWN · --json conserve tous les détails",
   );
+  if (audit.errors?.length > 0) {
+    lines.push(
+      "",
+      `⚠️ ${audit.errors.length} erreur(s) de découverte ou d'audit:`,
+      ...audit.errors.map((error) => `- ${error.path}: ${error.message}`),
+    );
+  }
   return lines.join("\n");
 }

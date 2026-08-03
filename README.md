@@ -14,11 +14,13 @@ eligible for deletion.
 
 ```bash
 npm install
-npm start
+npm start -- --root ~/Projects
 ```
 
-The default TTY experience is interactive. It scans first, then opens an
-`audit>` prompt with slash commands:
+The default TTY experience is interactive. With `--root`, the CLI recursively
+discovers Git repositories below the folder, deduplicates linked worktrees that
+belong to the same repository, and audits every repository independently. It
+then opens an `audit>` prompt with slash commands:
 
 ```text
 /help
@@ -33,16 +35,23 @@ process scan and verifies the exact path, branch, commit, clean status, and
 open-file state immediately before each removal. Removal uses the non-force
 `git worktree remove` command.
 
+Use `--cwd PATH` to audit one repository explicitly. `--root PATH` and
+`--repos-dir PATH` are equivalent. Discovery stops at `--max-depth N` (default:
+8) and skips dependency/build directories such as `node_modules`, `target`, and
+`dist`. Use either `--cwd` or `--root`, not both.
+
 ## Non-interactive use
 
 ```bash
-node src/cli.mjs --json
+node src/cli.mjs --root ~/Projects --json
 node src/cli.mjs --cwd /path/to/repository --merged-only
 node src/cli.mjs --no-github --no-chat
 ```
 
-The JSON mode is suitable for scripts. A non-TTY without `--json` prints a
-human-readable report and performs no mutation.
+The JSON mode is suitable for scripts. Multi-repository JSON includes
+`root`, `repositories`, flattened `rows`, and `errors`, so callers can report
+partial discovery without treating it as a complete scan. A non-TTY without
+`--json` prints a human-readable report and performs no mutation.
 
 ## Commands
 

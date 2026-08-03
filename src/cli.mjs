@@ -3,6 +3,7 @@
 import { createInterface } from "node:readline";
 
 import {
+  auditRepositories,
   auditWorktrees,
   DECISIONS,
   parseArgs,
@@ -16,7 +17,7 @@ const PROMPT = "audit> ";
 const DEFAULT_FILTER = "all";
 const SAFE_FILTER = "safe";
 const FILTERS = new Set([DEFAULT_FILTER, SAFE_FILTER, "review", "unknown"]);
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const MAX_PREVIEW_ROWS = 20;
 
 const HELP = `
@@ -41,9 +42,12 @@ la saisie exacte de DELETE et une seconde vérification Git/processus.
 
 function progressWriter(errorOutput) {
   return (progress) => {
+    const scope = progress.repositoryIndex
+      ? `[${progress.repositoryIndex}/${progress.repositoryTotal}] ${progress.repositoryRoot} · `
+      : "";
     if (progress.stage === "worktrees") {
       errorOutput.write(
-        `🔎 ${progress.total} worktrees détectés. Analyse en cours...\n`,
+        `🔎 ${scope}${progress.total} worktrees détectés. Analyse en cours...\n`,
       );
     } else if (progress.stage === "processes") {
       errorOutput.write("⚙️ Scan des processus...\n");
@@ -79,15 +83,22 @@ function safeRows(rows) {
   return rows.filter((row) => row.decision === DECISIONS.REMOVE_CANDIDATE);
 }
 
+function auditTitle(audit) {
+  if (audit.root) return `workspace: ${audit.root}`;
+  return audit.repository ?? "dépôt Git local";
+}
+
 function formatRow(row, index, selected) {
   const selectedMarker = selected.has(row.path) ? "*" : " ";
+  const repositoryLabel = row.repository ?? row.repoRoot;
+  const scope = repositoryLabel ? `[${repositoryLabel}] ` : "";
   const pullRequest = row.pr.pullRequest
     ? `PR #${row.pr.pullRequest.number} ${row.pr.pullRequest.state}`
     : row.pr.kind;
   const chat = row.chat.threads[0]
     ? `${row.chat.threads[0].title} [${row.chat.threads[0].status}]`
     : `chat ${row.chat.kind}`;
-  return `${selectedMarker} ${String(index).padStart(2)} ${row.marker} ${row.size.padStart(9)} ${row.path} · ${pullRequest} · 💬 ${chat} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}`;
+  return `${selectedMarker} ${String(index).padStart(2)} ${row.marker} ${row.size.padStart(9)} ${scope}${row.path} · ${pullRequest} · 💬 ${chat} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}`;
 }
 
 export function renderInteractive(
@@ -100,7 +111,7 @@ export function renderInteractive(
     selected.has(row.path),
   ).length;
   const lines = [
-    `\n🧹 Worktree Audit · ${audit.repository ?? "dépôt Git local"}`,
+    `\n🧹 Worktree Audit · ${auditTitle(audit)}`,
     `${audit.rows.length} worktrees · ${safeCount} SAFE · ${selectedCount} sélectionné(s) · filtre=${filter}`,
     "Commandes: /help /safe /preview /delete /refresh /quit. Les lignes SAFE sont supprimables après double validation.",
     "",
@@ -116,6 +127,14 @@ export function renderInteractive(
     "",
     "* sélectionné · SAFE sélectionnable · REVIEW/UNKNOWN conservé par défaut",
   );
+  if (audit.errors?.length > 0) {
+    lines.push(
+      "",
+      `⚠️ ${audit.errors.length} erreur(s): ${audit.errors
+        .map((error) => error.path)
+        .join(", ")}`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -163,24 +182,57 @@ function selectedRows(audit, selected) {
   return audit.rows.filter((row) => selected.has(row.path));
 }
 
+function filterMergedOnly(audit) {
+  if (!audit.repositories) {
+    return {
+      ...audit,
+      rows: audit.rows.filter((row) => row.pr.kind === "MERGED_EXACT"),
+    };
+  }
+  const repositories = audit.repositories.map((repository) => ({
+    ...repository,
+    rows: repository.rows.filter((row) => row.pr.kind === "MERGED_EXACT"),
+  }));
+  return {
+    ...audit,
+    repositories,
+    rows: audit.rows.filter((row) => row.pr.kind === "MERGED_EXACT"),
+  };
+}
+
 function printPreview(output, rows) {
   output.write(`\nPreview de suppression (${rows.length}):\n`);
   rows.slice(0, MAX_PREVIEW_ROWS).forEach((row) => {
-    output.write(`- ${row.path} (${row.size}) · ${row.head}\n`);
+    const scope = row.repository ?? row.repoRoot;
+    output.write(
+      `- ${scope ? `[${scope}] ` : ""}${row.path} (${row.size}) · ${row.head}\n`,
+    );
   });
   if (rows.length > MAX_PREVIEW_ROWS) {
     output.write(`- ... ${rows.length - MAX_PREVIEW_ROWS} autre(s)\n`);
   }
 }
 
-async function collectAudit(args, errorOutput, auditFn) {
-  return auditFn({
+async function collectAudit(
+  args,
+  errorOutput,
+  auditFn = auditWorktrees,
+  rootAuditFn = auditRepositories,
+) {
+  const options = {
     cwd: args.cwd,
     noGithub: args.noGithub,
     noChat: args.noChat,
     deepProcessScan: args.deepProcessScan,
     onProgress: progressWriter(errorOutput),
-  });
+  };
+  return args.root
+    ? rootAuditFn({
+        ...options,
+        root: args.root,
+        maxDepth: args.maxDepth,
+      })
+    : auditFn(options);
 }
 
 export async function executeDeletion({
@@ -190,6 +242,7 @@ export async function executeDeletion({
   output,
   errorOutput,
   auditFn,
+  rootAuditFn,
   removeFn,
   verifyFn,
 }) {
@@ -197,20 +250,23 @@ export async function executeDeletion({
     { ...args, deepProcessScan: true },
     errorOutput,
     auditFn,
+    rootAuditFn,
   );
   const latestRows = new Map(latestAudit.rows.map((row) => [row.path, row]));
   let removed = 0;
   for (const path of paths) {
     const row = latestRows.get(path);
+    const repoRoot = row?.repoRoot ?? audit.repoRoot;
     if (
       !row ||
       row.decision !== DECISIONS.REMOVE_CANDIDATE ||
-      !verifyFn({ repoRoot: audit.repoRoot, row })
+      !repoRoot ||
+      !verifyFn({ repoRoot, row })
     ) {
       output.write(`Conservé, preuve insuffisante: ${path}\n`);
       continue;
     }
-    const result = removeFn({ repoRoot: audit.repoRoot, path: row.path });
+    const result = removeFn({ repoRoot, path: row.path });
     if (result.status === 0) {
       output.write(`Supprimé: ${row.path}\n`);
       removed += 1;
@@ -228,6 +284,7 @@ export async function runInteractiveSession({
   output = process.stdout,
   errorOutput = process.stderr,
   auditFn = auditWorktrees,
+  rootAuditFn = auditRepositories,
   removeFn = removeWorktree,
   verifyFn = verifyRemovalTarget,
 } = {}) {
@@ -273,6 +330,7 @@ export async function runInteractiveSession({
               output,
               errorOutput,
               auditFn,
+              rootAuditFn,
               removeFn,
               verifyFn,
             });
@@ -368,7 +426,12 @@ export async function runInteractiveSession({
         } else if (parsed.command === "cancel") {
           output.write("Aucune suppression en attente.\n");
         } else if (parsed.command === "refresh") {
-          currentAudit = await collectAudit(args, errorOutput, auditFn);
+          currentAudit = await collectAudit(
+            args,
+            errorOutput,
+            auditFn,
+            rootAuditFn,
+          );
           selected = new Set();
           output.write("Audit actualisé.\n");
         } else if (parsed.command === "json") {
@@ -403,7 +466,10 @@ export async function runCli({
   if (args.help) {
     output.write("Usage: worktree-audit [options]\n");
     output.write(
-      "Options: --interactive --json --cwd PATH --merged-only --no-github --no-chat --deep-process-scan --version\n",
+      "Options: --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --merged-only --no-github --no-chat --deep-process-scan --version\n",
+    );
+    output.write(
+      "--cwd audite un dépôt. --root découvre récursivement plusieurs dépôts.\n",
     );
     output.write(
       "Sans option dans un TTY, le mode interactif démarre automatiquement.\n",
@@ -417,13 +483,8 @@ export async function runCli({
   if (args.interactive && (!input.isTTY || !output.isTTY)) {
     throw new Error("--interactive nécessite un terminal interactif (TTY).");
   }
-  const audit = await collectAudit(args, errorOutput, auditWorktrees);
-  const filteredAudit = args.mergedOnly
-    ? {
-        ...audit,
-        rows: audit.rows.filter((row) => row.pr.kind === "MERGED_EXACT"),
-      }
-    : audit;
+  const audit = await collectAudit(args, errorOutput);
+  const filteredAudit = args.mergedOnly ? filterMergedOnly(audit) : audit;
   if (args.json) {
     output.write(`${JSON.stringify(filteredAudit, null, 2)}\n`);
     return 0;
