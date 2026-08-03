@@ -11,7 +11,8 @@
     "build": "tsc",
     "start": "npm run build && node dist/src/cli.js",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "ci": "bash scripts/local-ci.sh"
   },
   "engines": {
     "node": ">=20"

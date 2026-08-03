@@ -1,0 +1,17 @@
+version: 2
+
+triggerPaths:
+  - "socket.yml"
+  - "socket.yaml"
+  - "package.json"
+  - "package-lock.json"
+  - "npm-shrinkwrap.json"
+  - "**/package.json"
+  - "**/package-lock.json"
+  - "**/npm-shrinkwrap.json"
+
+githubApp:
+  enabled: true
+  pullRequestAlertsEnabled: true
+  dependencyOverviewEnabled: true
+  projectReportsEnabled: false

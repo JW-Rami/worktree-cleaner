@@ -78,9 +78,19 @@ partial discovery without treating it as a complete scan. A non-TTY without
 ## Development
 
 ```bash
+npm run ci
 npm run build
 npm test
 npm run check
 ```
 
-TypeScript is compiled to `dist/`. Runtime dependencies are not required.
+`npm run ci` is the same locked-install, typecheck, build, and test path used
+by GitHub Actions. TypeScript is compiled to `dist/`. Runtime dependencies are
+not required after `npm ci`.
+
+## Supply-chain security
+
+Socket Security is configured through the GitHub App and the root
+`socket.yml`, following the same model as Invisible. Pull request alerts cover
+npm manifests and lockfiles. Install the Socket GitHub App on the repository to
+enable the checks; no Socket token is stored in GitHub Actions.
