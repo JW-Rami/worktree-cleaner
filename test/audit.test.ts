@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   auditRepositories,
   buildAuditRow,
+  DEFAULT_AUDIT_CONCURRENCY,
   defaultSelection,
   DEFAULT_DISCOVERY_MAX_DEPTH,
   defaultWorkspaceRoot,
@@ -45,6 +46,7 @@ import {
 
 const mergedHead = "a".repeat(40);
 const staleHead = "b".repeat(40);
+const AUDIT_CONCURRENCY_TEST_DELAY_MS = 10;
 
 function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
   return {
@@ -309,6 +311,7 @@ detached
         root: null,
         all: false,
         maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
+        concurrency: DEFAULT_AUDIT_CONCURRENCY,
         json: false,
         interactive: true,
         mergedOnly: true,
@@ -325,6 +328,7 @@ detached
         root: "/tmp/projects",
         all: false,
         maxDepth: 3,
+        concurrency: DEFAULT_AUDIT_CONCURRENCY,
         json: false,
         interactive: false,
         mergedOnly: false,
@@ -343,6 +347,7 @@ detached
       root: null,
       all: true,
       maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
+      concurrency: DEFAULT_AUDIT_CONCURRENCY,
       json: false,
       interactive: false,
       mergedOnly: false,
@@ -351,6 +356,11 @@ detached
       deepProcessScan: false,
     });
     assert.equal(parseArgs(["-all"]).all, true);
+    assert.equal(parseArgs(["--concurrency", "8"]).concurrency, 8);
+    assert.throws(
+      () => parseArgs(["--concurrency", "0"]),
+      /--concurrency must be an integer/u,
+    );
   });
 
   it("uses the parent of the current repository as the automatic workspace root", () => {
@@ -372,6 +382,81 @@ detached
       defaultWorkspaceRoot("/workspace/projects/repository", runCommand),
       "/workspace/projects",
     );
+  });
+
+  it("audits repositories in parallel with bounded concurrency and stable ordering", async () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "worktree-audit-concurrency-")),
+    );
+    const repoRoots = [
+      join(root, "repo-a"),
+      join(root, "repo-b"),
+      join(root, "repo-c"),
+      join(root, "repo-d"),
+    ];
+    const orderedRoots = [...repoRoots].sort();
+    const metadata = new Map(
+      repoRoots.map((repoRoot) => [
+        repoRoot,
+        { repoRoot, commonDir: join(repoRoot, ".git") },
+      ]),
+    );
+    for (const repoRoot of repoRoots) {
+      mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    }
+
+    const runCommand = (_command: string, args: string[]): CommandResult => {
+      const candidate = metadata.get(args[1]);
+      if (!candidate) return { status: 1, stdout: "", stderr: "not a repo" };
+      return {
+        status: 0,
+        stdout: args.includes("--show-toplevel")
+          ? `${candidate.repoRoot}\n`
+          : `${candidate.commonDir}\n`,
+        stderr: "",
+      };
+    };
+    let active = 0;
+    let maxActive = 0;
+
+    try {
+      const aggregate = await auditRepositories({
+        root,
+        runCommand,
+        noGithub: true,
+        noChat: true,
+        concurrency: 2,
+        auditRepository: async ({ cwd = "" }) => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) =>
+            setTimeout(resolve, AUDIT_CONCURRENCY_TEST_DELAY_MS),
+          );
+          active -= 1;
+          if (cwd === orderedRoots[1]) throw new Error("simulated failure");
+          return {
+            repoRoot: cwd,
+            repository: null,
+            rows: [],
+          };
+        },
+      });
+
+      assert.equal(maxActive, 2);
+      assert.deepEqual(
+        aggregate.repositories.map((repository) => repository.repoRoot),
+        orderedRoots.filter((repoRoot) => repoRoot !== orderedRoots[1]),
+      );
+      assert.deepEqual(aggregate.errors, [
+        {
+          stage: "audit",
+          path: orderedRoots[1],
+          message: "simulated failure",
+        },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("supports slash commands and compact range selection", () => {

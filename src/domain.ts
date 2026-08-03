@@ -43,6 +43,7 @@ export interface CliArgs {
   root: string | null;
   all: boolean;
   maxDepth: number;
+  concurrency: number;
   json: boolean;
   interactive: boolean;
   mergedOnly: boolean;
@@ -190,6 +191,7 @@ export interface AuditRepositoriesOptions
   root?: string;
   auditRepository?: AuditRepositoryFunction;
   maxDepth?: number;
+  concurrency?: number;
 }
 
 export type AuditRepositoriesFunction = (
@@ -214,3 +216,5 @@ export const DECISIONS = Object.freeze({
 export type Decision = (typeof DECISIONS)[keyof typeof DECISIONS];
 
 export const DEFAULT_DISCOVERY_MAX_DEPTH = 8;
+export const DEFAULT_AUDIT_CONCURRENCY = 4;
+export const MAX_AUDIT_CONCURRENCY = 16;

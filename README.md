@@ -20,8 +20,10 @@ npm start
 By default, the CLI uses the parent directory of the current Git repository as
 the workspace root. It recursively discovers sibling and nested repositories,
 deduplicates linked worktrees that belong to the same repository, and audits
-every repository independently. Use `--cwd PATH` to restrict the audit to one
-repository, or `--root PATH` to choose the workspace root explicitly.
+every repository independently. Repository audits run in parallel with a
+bounded concurrency of 4. Use `--cwd PATH` to restrict the audit to one
+repository, `--root PATH` to choose the workspace root explicitly, or
+`--concurrency N` to tune parallelism from 1 to 16.
 
 `--all` and `-all` remain available to make the recursive workspace scan
 explicit. If the selected path is a Git repository, its parent directory is
@@ -53,7 +55,8 @@ Discovery stops at
 `--max-depth N` (default: 8) and skips dependency/build directories such as
 `node_modules`, `target`, and `dist`. Codex chats are matched independently for
 every discovered worktree unless `--no-chat` is set. Use either `--cwd` or
-`--root`, not both.
+`--root`, not both. Lower `--concurrency` if local GitHub or Codex tooling is
+rate-limited.
 
 ## Non-interactive use
 
@@ -62,6 +65,7 @@ npm run build
 node dist/src/cli.js --root ~/Projects --json
 node dist/src/cli.js --all --cwd ~/Projects --json
 node dist/src/cli.js -all --json
+node dist/src/cli.js --all --concurrency 8
 node dist/src/cli.js --cwd /path/to/repository
 node dist/src/cli.js --cwd /path/to/repository --merged-only
 node dist/src/cli.js --no-github --no-chat

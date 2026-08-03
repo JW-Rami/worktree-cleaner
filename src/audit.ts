@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
 
 import {
+  DEFAULT_AUDIT_CONCURRENCY,
   DEFAULT_DISCOVERY_MAX_DEPTH,
+  MAX_AUDIT_CONCURRENCY,
   PROGRESS_STAGES,
   type AggregateAudit,
   type AggregateRow,
@@ -44,8 +46,10 @@ import {
 } from "./worktree.js";
 
 export {
+  DEFAULT_AUDIT_CONCURRENCY,
   DECISIONS,
   DEFAULT_DISCOVERY_MAX_DEPTH,
+  MAX_AUDIT_CONCURRENCY,
   PROGRESS_STAGES,
 } from "./domain.js";
 export type {
@@ -307,41 +311,72 @@ export async function auditRepositories({
   noGithub = false,
   noChat = false,
   deepProcessScan = false,
+  concurrency = DEFAULT_AUDIT_CONCURRENCY,
   onProgress = () => {},
 }: AuditRepositoriesOptions = {}): Promise<AggregateAudit> {
+  if (
+    !Number.isInteger(concurrency) ||
+    concurrency < 1 ||
+    concurrency > MAX_AUDIT_CONCURRENCY
+  ) {
+    throw new Error(
+      `concurrency must be an integer between 1 and ${MAX_AUDIT_CONCURRENCY}.`,
+    );
+  }
   const discovery = discoverRepositoryRoots(root, { runCommand, maxDepth });
-  const repositories: SingleAudit[] = [];
   const errors: AuditError[] = discovery.errors.map((error) => ({
     stage: "discovery",
     ...error,
   }));
 
-  for (let index = 0; index < discovery.roots.length; index += 1) {
-    const repoRoot = discovery.roots[index];
-    try {
-      const audit = await auditRepository({
-        cwd: repoRoot,
-        runCommand,
-        chatLookup,
-        noGithub,
-        noChat,
-        deepProcessScan,
-        onProgress: repositoryProgress(
-          onProgress,
-          index + 1,
-          discovery.roots.length,
-          repoRoot,
-        ),
-      });
-      repositories.push(audit);
-    } catch (error) {
-      errors.push({
-        stage: "audit",
-        path: repoRoot,
-        message: error instanceof Error ? error.message : String(error),
-      });
+  const repositoriesByIndex: Array<SingleAudit | null> = Array.from(
+    { length: discovery.roots.length },
+    () => null,
+  );
+  const auditErrorsByIndex: AuditError[][] = Array.from(
+    { length: discovery.roots.length },
+    () => [],
+  );
+  let nextRepositoryIndex = 0;
+  const workerCount = Math.min(concurrency, discovery.roots.length);
+  const auditNextRepository = async (): Promise<void> => {
+    while (nextRepositoryIndex < discovery.roots.length) {
+      const index = nextRepositoryIndex;
+      nextRepositoryIndex += 1;
+      const repoRoot = discovery.roots[index];
+      try {
+        repositoriesByIndex[index] = await auditRepository({
+          cwd: repoRoot,
+          runCommand,
+          chatLookup,
+          noGithub,
+          noChat,
+          deepProcessScan,
+          onProgress: repositoryProgress(
+            onProgress,
+            index + 1,
+            discovery.roots.length,
+            repoRoot,
+          ),
+        });
+      } catch (error) {
+        auditErrorsByIndex[index].push({
+          stage: "audit",
+          path: repoRoot,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
-  }
+  };
+
+  await Promise.all(
+    Array.from({ length: workerCount }, () => auditNextRepository()),
+  );
+
+  const repositories = repositoriesByIndex.filter(
+    (audit): audit is SingleAudit => audit !== null,
+  );
+  errors.push(...auditErrorsByIndex.flat());
 
   return {
     root: discovery.root,
