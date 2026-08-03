@@ -14,13 +14,13 @@ eligible for deletion.
 
 ```bash
 npm install
-npm start -- --root ~/Projects
+npm start -- --all --root ~/Projects
 ```
 
-The default TTY experience is interactive. With `--root`, the CLI recursively
-discovers Git repositories below the folder, deduplicates linked worktrees that
-belong to the same repository, and audits every repository independently. It
-then opens an `audit>` prompt with slash commands:
+The default TTY experience is interactive. With `--all`, the CLI recursively
+discovers Git repositories below the selected root, deduplicates linked
+worktrees that belong to the same repository, and audits every repository
+independently. It then opens an `audit>` prompt with slash commands:
 
 ```text
 /help
@@ -38,13 +38,18 @@ open-file state immediately before each removal. Removal uses the non-force
 Use `--cwd PATH` to audit one repository explicitly. `--root PATH` and
 `--repos-dir PATH` are equivalent. Discovery stops at `--max-depth N` (default:
 8) and skips dependency/build directories such as `node_modules`, `target`, and
-`dist`. Use either `--cwd` or `--root`, not both.
+`dist`. Use `--all` or `-all` to audit every repository below `--root PATH`,
+`--cwd PATH`, or the current directory when no path is given. Codex chats are
+matched independently for every discovered worktree unless `--no-chat` is set.
+Use either `--cwd` or `--root`, not both.
 
 ## Non-interactive use
 
 ```bash
 npm run build
 node dist/src/cli.js --root ~/Projects --json
+node dist/src/cli.js --all --cwd ~/Projects --json
+node dist/src/cli.js -all --json
 node dist/src/cli.js --cwd /path/to/repository --merged-only
 node dist/src/cli.js --no-github --no-chat
 ```

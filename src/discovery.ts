@@ -34,6 +34,7 @@ export function parseArgs(argv: string[] = []): CliArgs {
   const args: CliArgs = {
     cwd: process.cwd(),
     root: null,
+    all: false,
     maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
     json: false,
     interactive: false,
@@ -53,6 +54,8 @@ export function parseArgs(argv: string[] = []): CliArgs {
     } else if (argument === "--root" || argument === "--repos-dir") {
       rootWasProvided = true;
       args.root = resolve(argv[++index] ?? "");
+    } else if (argument === "--all" || argument === "-all") {
+      args.all = true;
     } else if (argument === "--max-depth") {
       const value = Number.parseInt(argv[++index] ?? "", 10);
       if (!Number.isInteger(value) || value < 0) {

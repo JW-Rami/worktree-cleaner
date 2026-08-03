@@ -305,6 +305,7 @@ detached
       {
         cwd: "/tmp/repo",
         root: null,
+        all: false,
         maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
         json: false,
         interactive: true,
@@ -319,6 +320,7 @@ detached
       {
         cwd: process.cwd(),
         root: "/tmp/projects",
+        all: false,
         maxDepth: 3,
         json: false,
         interactive: false,
@@ -332,6 +334,19 @@ detached
       () => parseArgs(["--cwd", "/tmp/repo", "--root", "/tmp/projects"]),
       /Use either --cwd or --root, not both/u,
     );
+    assert.deepEqual(parseArgs(["--all", "--cwd", "/tmp/projects"]), {
+      cwd: "/tmp/projects",
+      root: null,
+      all: true,
+      maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
+      json: false,
+      interactive: false,
+      mergedOnly: false,
+      noGithub: false,
+      noChat: false,
+      deepProcessScan: false,
+    });
+    assert.equal(parseArgs(["-all"]).all, true);
   });
 
   it("supports slash commands and compact range selection", () => {

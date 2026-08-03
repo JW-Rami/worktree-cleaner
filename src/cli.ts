@@ -127,10 +127,11 @@ async function collectAudit(
     deepProcessScan: args.deepProcessScan ?? false,
     onProgress: progressWriter(errorOutput),
   };
-  return args.root
+  const root = args.root ?? (args.all ? args.cwd : null);
+  return root
     ? rootAuditFn({
         ...options,
-        root: args.root,
+        root,
         maxDepth: args.maxDepth ?? DEFAULT_DISCOVERY_MAX_DEPTH,
       })
     : auditFn(options);
@@ -365,10 +366,10 @@ export async function runCli({
   if (args.help) {
     output.write("Usage: worktree-audit [options]\n");
     output.write(
-      "Options: --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --merged-only --no-github --no-chat --deep-process-scan --version\n",
+      "Options: --all (-all) --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --merged-only --no-github --no-chat --deep-process-scan --version\n",
     );
     output.write(
-      "--cwd audits one repository. --root recursively discovers multiple repositories.\n",
+      "--cwd audits one repository. --all recursively discovers repositories under --cwd, --root, or the current directory.\n",
     );
     output.write(
       "Without options in a TTY, interactive mode starts automatically.\n",

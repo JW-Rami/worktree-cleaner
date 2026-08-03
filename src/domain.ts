@@ -40,6 +40,7 @@ export type ProgressHandler = (progress: ProgressEvent) => void;
 export interface CliArgs {
   cwd: string;
   root: string | null;
+  all: boolean;
   maxDepth: number;
   json: boolean;
   interactive: boolean;
