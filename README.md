@@ -14,13 +14,26 @@ eligible for deletion.
 
 ```bash
 npm install
+npm start
+```
+
+By default, the CLI uses the parent directory of the current Git repository as
+the workspace root. It recursively discovers sibling and nested repositories,
+deduplicates linked worktrees that belong to the same repository, and audits
+every repository independently. Use `--cwd PATH` to restrict the audit to one
+repository, or `--root PATH` to choose the workspace root explicitly.
+
+`--all` and `-all` remain available to make the recursive workspace scan
+explicit. If the selected path is a Git repository, its parent directory is
+used as the workspace root. If it is not a repository, the selected directory
+is used:
+
+```bash
 npm start -- --all --root ~/Projects
 ```
 
-The default TTY experience is interactive. With `--all`, the CLI recursively
-discovers Git repositories below the selected root, deduplicates linked
-worktrees that belong to the same repository, and audits every repository
-independently. It then opens an `audit>` prompt with slash commands:
+The default TTY experience is interactive. It then opens an `audit>` prompt
+with slash commands:
 
 ```text
 /help
@@ -35,13 +48,12 @@ process scan and verifies the exact path, branch, commit, clean status, and
 open-file state immediately before each removal. Removal uses the non-force
 `git worktree remove` command.
 
-Use `--cwd PATH` to audit one repository explicitly. `--root PATH` and
-`--repos-dir PATH` are equivalent. Discovery stops at `--max-depth N` (default:
-8) and skips dependency/build directories such as `node_modules`, `target`, and
-`dist`. Use `--all` or `-all` to audit every repository below `--root PATH`,
-`--cwd PATH`, or the current directory when no path is given. Codex chats are
-matched independently for every discovered worktree unless `--no-chat` is set.
-Use either `--cwd` or `--root`, not both.
+`--root PATH` and `--repos-dir PATH` are equivalent and always take precedence.
+Discovery stops at
+`--max-depth N` (default: 8) and skips dependency/build directories such as
+`node_modules`, `target`, and `dist`. Codex chats are matched independently for
+every discovered worktree unless `--no-chat` is set. Use either `--cwd` or
+`--root`, not both.
 
 ## Non-interactive use
 
@@ -50,6 +62,7 @@ npm run build
 node dist/src/cli.js --root ~/Projects --json
 node dist/src/cli.js --all --cwd ~/Projects --json
 node dist/src/cli.js -all --json
+node dist/src/cli.js --cwd /path/to/repository
 node dist/src/cli.js --cwd /path/to/repository --merged-only
 node dist/src/cli.js --no-github --no-chat
 ```

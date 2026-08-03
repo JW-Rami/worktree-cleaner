@@ -22,6 +22,7 @@ import {
 import { commandResult } from "./command.js";
 import {
   discoverRepositoryRoots,
+  defaultWorkspaceRoot,
   parseArgs,
   parseWorktreeList,
 } from "./discovery.js";
@@ -82,6 +83,7 @@ export type {
 export { commandResult } from "./command.js";
 export {
   discoverRepositoryRoots,
+  defaultWorkspaceRoot,
   parseArgs,
   parseWorktreeList,
 } from "./discovery.js";

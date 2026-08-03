@@ -10,6 +10,7 @@ import {
   DECISIONS,
   auditRepositories,
   auditWorktrees,
+  defaultWorkspaceRoot,
   type CliArgs,
   type CommandResult,
   DEFAULT_DISCOVERY_MAX_DEPTH,
@@ -127,7 +128,9 @@ async function collectAudit(
     deepProcessScan: args.deepProcessScan ?? false,
     onProgress: progressWriter(errorOutput),
   };
-  const root = args.root ?? (args.all ? args.cwd : null);
+  const root = args.root ?? (
+    args.cwdExplicit && !args.all ? null : defaultWorkspaceRoot(args.cwd)
+  );
   return root
     ? rootAuditFn({
         ...options,
@@ -369,7 +372,7 @@ export async function runCli({
       "Options: --all (-all) --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --merged-only --no-github --no-chat --deep-process-scan --version\n",
     );
     output.write(
-      "--cwd audits one repository. --all recursively discovers repositories under --cwd, --root, or the current directory.\n",
+      "--cwd audits one repository. Without a scope option, the parent of the current Git repository is scanned as a workspace. --all explicitly enables the same recursive workspace scan; --root sets its directory.\n",
     );
     output.write(
       "Without options in a TTY, interactive mode starts automatically.\n",

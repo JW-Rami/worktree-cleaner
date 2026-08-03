@@ -5,7 +5,7 @@ import {
   realpathSync,
   type Dirent,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
   DEFAULT_DISCOVERY_MAX_DEPTH,
@@ -33,6 +33,7 @@ const DISCOVERY_DIRECTORY_IGNORES = new Set([
 export function parseArgs(argv: string[] = []): CliArgs {
   const args: CliArgs = {
     cwd: process.cwd(),
+    cwdExplicit: false,
     root: null,
     all: false,
     maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
@@ -50,6 +51,7 @@ export function parseArgs(argv: string[] = []): CliArgs {
     const argument = argv[index];
     if (argument === "--cwd") {
       cwdWasProvided = true;
+      args.cwdExplicit = true;
       args.cwd = resolve(argv[++index] ?? "");
     } else if (argument === "--root" || argument === "--repos-dir") {
       rootWasProvided = true;
@@ -130,6 +132,21 @@ function safeRealPath(path: string): string {
   } catch {
     return resolve(path);
   }
+}
+
+export function defaultWorkspaceRoot(
+  cwd: string,
+  runCommand: CommandRunner = commandResult,
+): string {
+  const result = runCommand("git", [
+    "-C",
+    cwd,
+    "rev-parse",
+    "--show-toplevel",
+  ]);
+  if (result.status !== 0 || result.stdout.trim().length === 0)
+    return safeRealPath(cwd);
+  return dirname(safeRealPath(result.stdout.trim()));
 }
 
 function discoveryError(path: string, error: unknown): AuditError {

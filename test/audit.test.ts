@@ -15,6 +15,7 @@ import {
   buildAuditRow,
   defaultSelection,
   DEFAULT_DISCOVERY_MAX_DEPTH,
+  defaultWorkspaceRoot,
   discoverRepositoryRoots,
   groupChatThreadsByCwd,
   matchPullRequest,
@@ -304,6 +305,7 @@ detached
       parseArgs(["--interactive", "--merged-only", "--cwd", "/tmp/repo"]),
       {
         cwd: "/tmp/repo",
+        cwdExplicit: true,
         root: null,
         all: false,
         maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
@@ -319,6 +321,7 @@ detached
       parseArgs(["--root", "/tmp/projects", "--max-depth", "3"]),
       {
         cwd: process.cwd(),
+        cwdExplicit: false,
         root: "/tmp/projects",
         all: false,
         maxDepth: 3,
@@ -336,6 +339,7 @@ detached
     );
     assert.deepEqual(parseArgs(["--all", "--cwd", "/tmp/projects"]), {
       cwd: "/tmp/projects",
+      cwdExplicit: true,
       root: null,
       all: true,
       maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
@@ -347,6 +351,27 @@ detached
       deepProcessScan: false,
     });
     assert.equal(parseArgs(["-all"]).all, true);
+  });
+
+  it("uses the parent of the current repository as the automatic workspace root", () => {
+    const runCommand = (_command: string, args: string[]): CommandResult => {
+      assert.deepEqual(args, [
+        "-C",
+        "/workspace/projects/repository",
+        "rev-parse",
+        "--show-toplevel",
+      ]);
+      return {
+        status: 0,
+        stdout: "/workspace/projects/repository\n",
+        stderr: "",
+      };
+    };
+
+    assert.equal(
+      defaultWorkspaceRoot("/workspace/projects/repository", runCommand),
+      "/workspace/projects",
+    );
   });
 
   it("supports slash commands and compact range selection", () => {
@@ -399,7 +424,12 @@ detached
     const result = await executeDeletion({
       audit: { repoRoot: "/repo", repository: null, rows: [row] },
       paths: [row.path],
-      args: { cwd: "/repo", noGithub: false, noChat: false },
+      args: {
+        cwd: "/repo",
+        cwdExplicit: true,
+        noGithub: false,
+        noChat: false,
+      },
       output: { write() {} },
       errorOutput: { write() {} },
       auditFn: async () => ({
