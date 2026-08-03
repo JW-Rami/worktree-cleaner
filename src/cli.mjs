@@ -21,23 +21,23 @@ const VERSION = "0.2.0";
 const MAX_PREVIEW_ROWS = 20;
 
 const HELP = `
-Commandes:
-  /help                  Afficher cette aide
-  /list                  Afficher les worktrees visibles
-  /filter <nom>          Filtrer: all, safe, review, unknown
-  /select <n,...>        Sélectionner des lignes sûres
-  /safe                  Sélectionner toutes les lignes SAFE
-  /clear                 Vider la sélection
-  /preview               Prévisualiser la suppression
-  /delete                Demander confirmation, puis revalider avant suppression
-  /refresh               Refaire l'audit complet
-  /json                  Afficher le résultat structuré
-  /plain                 Afficher le rapport non interactif
-  /cancel                Annuler la confirmation en cours
-  /quit                  Quitter
+Commands:
+  /help                  Show this help
+  /list                  Show visible worktrees
+  /filter <name>         Filter: all, safe, review, unknown
+  /select <n,...>        Select safe rows
+  /safe                  Select all SAFE rows
+  /clear                 Clear the selection
+  /preview               Preview deletion
+  /delete                Request confirmation, then revalidate before deletion
+  /refresh               Re-run the full audit
+  /json                  Print the structured result
+  /plain                 Print the non-interactive report
+  /cancel                Cancel the pending confirmation
+  /quit                  Exit
 
-Les lignes SAFE sont les seules sélectionnables. La suppression exige ensuite
-la saisie exacte de DELETE et une seconde vérification Git/processus.
+SAFE rows are the only selectable rows. Deletion requires the exact DELETE
+confirmation and a second Git/process validation.
 `;
 
 function progressWriter(errorOutput) {
@@ -47,18 +47,18 @@ function progressWriter(errorOutput) {
       : "";
     if (progress.stage === "worktrees") {
       errorOutput.write(
-        `🔎 ${scope}${progress.total} worktrees détectés. Analyse en cours...\n`,
+        `🔎 ${scope}${progress.total} worktrees found. Analyzing...\n`,
       );
     } else if (progress.stage === "processes") {
-      errorOutput.write("⚙️ Scan des processus...\n");
+      errorOutput.write("⚙️ Scanning processes...\n");
     } else if (progress.stage === "sizes") {
       errorOutput.write(
-        `📦 Mesure des tailles: ${progress.completed}/${progress.total}\n`,
+        `📦 Measuring sizes: ${progress.completed}/${progress.total}\n`,
       );
     } else if (progress.stage === "github") {
-      errorOutput.write("🔗 Vérification des PR GitHub...\n");
+      errorOutput.write("🔗 Checking GitHub PRs...\n");
     } else if (progress.stage === "chats") {
-      errorOutput.write("💬 Association des chats Codex...\n");
+      errorOutput.write("💬 Matching Codex chats...\n");
     }
   };
 }
@@ -85,7 +85,7 @@ function safeRows(rows) {
 
 function auditTitle(audit) {
   if (audit.root) return `workspace: ${audit.root}`;
-  return audit.repository ?? "dépôt Git local";
+  return audit.repository ?? "local Git repository";
 }
 
 function formatRow(row, index, selected) {
@@ -112,12 +112,12 @@ export function renderInteractive(
   ).length;
   const lines = [
     `\n🧹 Worktree Audit · ${auditTitle(audit)}`,
-    `${audit.rows.length} worktrees · ${safeCount} SAFE · ${selectedCount} sélectionné(s) · filtre=${filter}`,
-    "Commandes: /help /safe /preview /delete /refresh /quit. Les lignes SAFE sont supprimables après double validation.",
+    `${audit.rows.length} worktrees · ${safeCount} SAFE · ${selectedCount} selected · filter=${filter}`,
+    "Commands: /help /safe /preview /delete /refresh /quit. SAFE rows can be deleted after double validation.",
     "",
   ];
   if (rows.length === 0) {
-    lines.push("Aucune ligne pour ce filtre.");
+    lines.push("No rows for this filter.");
   } else {
     rows.forEach((row) =>
       lines.push(formatRow(row, audit.rows.indexOf(row) + 1, selected)),
@@ -125,12 +125,12 @@ export function renderInteractive(
   }
   lines.push(
     "",
-    "* sélectionné · SAFE sélectionnable · REVIEW/UNKNOWN conservé par défaut",
+    "* selected · SAFE selectable · REVIEW/UNKNOWN kept by default",
   );
   if (audit.errors?.length > 0) {
     lines.push(
       "",
-      `⚠️ ${audit.errors.length} erreur(s): ${audit.errors
+      `⚠️ ${audit.errors.length} error(s): ${audit.errors
         .map((error) => error.path)
         .join(", ")}`,
     );
@@ -201,7 +201,7 @@ function filterMergedOnly(audit) {
 }
 
 function printPreview(output, rows) {
-  output.write(`\nPreview de suppression (${rows.length}):\n`);
+  output.write(`\nDeletion preview (${rows.length}):\n`);
   rows.slice(0, MAX_PREVIEW_ROWS).forEach((row) => {
     const scope = row.repository ?? row.repoRoot;
     output.write(
@@ -209,7 +209,7 @@ function printPreview(output, rows) {
     );
   });
   if (rows.length > MAX_PREVIEW_ROWS) {
-    output.write(`- ... ${rows.length - MAX_PREVIEW_ROWS} autre(s)\n`);
+    output.write(`- ... ${rows.length - MAX_PREVIEW_ROWS} more row(s)\n`);
   }
 }
 
@@ -263,15 +263,15 @@ export async function executeDeletion({
       !repoRoot ||
       !verifyFn({ repoRoot, row })
     ) {
-      output.write(`Conservé, preuve insuffisante: ${path}\n`);
+      output.write(`Kept, insufficient evidence: ${path}\n`);
       continue;
     }
     const result = removeFn({ repoRoot, path: row.path });
     if (result.status === 0) {
-      output.write(`Supprimé: ${row.path}\n`);
+      output.write(`Deleted: ${row.path}\n`);
       removed += 1;
     } else {
-      output.write(`Échec de suppression: ${row.path}\n`);
+      output.write(`Deletion failed: ${row.path}\n`);
     }
   }
   return { audit: latestAudit, removed };
@@ -300,7 +300,7 @@ export async function runInteractiveSession({
   const finish = () => {
     if (closed) return;
     closed = true;
-    output.write("\nSession terminée.\n");
+    output.write("\nSession ended.\n");
   };
   const readline = createInterface({
     input,
@@ -336,9 +336,9 @@ export async function runInteractiveSession({
             });
             currentAudit = result.audit;
             selected = new Set();
-            output.write(`\n${result.removed} worktree(s) supprimé(s).\n`);
+            output.write(`\n${result.removed} worktree(s) deleted.\n`);
           } else if (["/cancel", "cancel"].includes(value.toLowerCase())) {
-            output.write("Suppression annulée.\n");
+            output.write("Deletion cancelled.\n");
           } else if (
             ["/q", "/quit", "/exit", "q", "quit", "exit"].includes(
               value.toLowerCase(),
@@ -348,7 +348,7 @@ export async function runInteractiveSession({
             readline.close();
             return;
           } else {
-            output.write("Suppression annulée: confirmation exacte requise.\n");
+            output.write("Deletion cancelled: exact confirmation required.\n");
           }
           pendingDeletion = null;
           show();
@@ -369,7 +369,7 @@ export async function runInteractiveSession({
           const nextFilter = parsed.argument || DEFAULT_FILTER;
           if (!FILTERS.has(nextFilter)) {
             output.write(
-              `Filtre inconnu: ${nextFilter}. Valeurs: ${[...FILTERS].join(", ")}\n`,
+              `Unknown filter: ${nextFilter}. Values: ${[...FILTERS].join(", ")}\n`,
             );
           } else {
             filter = nextFilter;
@@ -391,14 +391,14 @@ export async function runInteractiveSession({
             currentAudit.rows.length,
           );
           if (selection.invalid.length > 0) {
-            output.write(`Lignes invalides: ${selection.invalid.join(", ")}\n`);
+            output.write(`Invalid rows: ${selection.invalid.join(", ")}\n`);
           }
           for (const index of selection.indexes) {
             const row = rowIndexMap(currentAudit.rows).get(index);
             if (!row || !rows.includes(row)) {
-              output.write(`Ligne non visible: ${index}\n`);
+              output.write(`Row not visible: ${index}\n`);
             } else if (row.decision !== DECISIONS.REMOVE_CANDIDATE) {
-              output.write(`Ligne ${index} non SAFE, conservée.\n`);
+              output.write(`Row ${index} is not SAFE and was kept.\n`);
             } else if (parsed.command === "select") {
               selected.add(row.path);
             } else {
@@ -408,23 +408,23 @@ export async function runInteractiveSession({
         } else if (parsed.command === "preview") {
           const chosen = selectedRows(currentAudit, selected);
           if (chosen.length === 0)
-            output.write("Aucune suppression sélectionnée.\n");
+            output.write("No deletion selected.\n");
           else printPreview(output, chosen);
         } else if (parsed.command === "delete") {
           const chosen = selectedRows(currentAudit, selected);
           if (chosen.length === 0) {
             output.write(
-              "Aucune suppression sélectionnée. Utilise /safe ou /select.\n",
+              "No deletion selected. Use /safe or /select.\n",
             );
           } else {
             printPreview(output, chosen);
             output.write(
-              `Tape ${DELETE_CONFIRMATION} pour confirmer, ou /cancel.\n`,
+              `Type ${DELETE_CONFIRMATION} to confirm, or /cancel.\n`,
             );
             pendingDeletion = new Set(chosen.map((row) => row.path));
           }
         } else if (parsed.command === "cancel") {
-          output.write("Aucune suppression en attente.\n");
+          output.write("No deletion is pending.\n");
         } else if (parsed.command === "refresh") {
           currentAudit = await collectAudit(
             args,
@@ -433,18 +433,18 @@ export async function runInteractiveSession({
             rootAuditFn,
           );
           selected = new Set();
-          output.write("Audit actualisé.\n");
+          output.write("Audit refreshed.\n");
         } else if (parsed.command === "json") {
           output.write(`${JSON.stringify(currentAudit, null, 2)}\n`);
         } else if (parsed.command === "plain") {
           output.write(`${renderAudit(currentAudit, { color: false })}\n`);
         } else {
-          output.write(`Commande inconnue: ${parsed.command}. Tape /help.\n`);
+          output.write(`Unknown command: ${parsed.command}. Type /help.\n`);
         }
         if (!closed && !["list", "show"].includes(parsed.command)) show();
       } catch (error) {
         output.write(
-          `Erreur: ${error instanceof Error ? error.message : String(error)}\n`,
+          `Error: ${error instanceof Error ? error.message : String(error)}\n`,
         );
       } finally {
         if (!closed) {
@@ -469,10 +469,10 @@ export async function runCli({
       "Options: --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --merged-only --no-github --no-chat --deep-process-scan --version\n",
     );
     output.write(
-      "--cwd audite un dépôt. --root découvre récursivement plusieurs dépôts.\n",
+      "--cwd audits one repository. --root recursively discovers multiple repositories.\n",
     );
     output.write(
-      "Sans option dans un TTY, le mode interactif démarre automatiquement.\n",
+      "Without options in a TTY, interactive mode starts automatically.\n",
     );
     return 0;
   }
@@ -481,7 +481,7 @@ export async function runCli({
     return 0;
   }
   if (args.interactive && (!input.isTTY || !output.isTTY)) {
-    throw new Error("--interactive nécessite un terminal interactif (TTY).");
+    throw new Error("--interactive requires an interactive terminal (TTY).");
   }
   const audit = await collectAudit(args, errorOutput);
   const filteredAudit = args.mergedOnly ? filterMergedOnly(audit) : audit;
@@ -493,7 +493,7 @@ export async function runCli({
   if (!interactive) {
     output.write(`${renderAudit(filteredAudit, { color: false })}\n`);
     output.write(
-      "Mode non interactif. Utilise un TTY ou --interactive pour les commandes.\n",
+      "Non-interactive mode. Use a TTY or --interactive for commands.\n",
     );
     return 0;
   }

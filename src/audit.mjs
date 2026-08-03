@@ -129,7 +129,7 @@ export function parseArgs(argv = []) {
       const value = Number.parseInt(argv[++index] ?? "", 10);
       if (!Number.isInteger(value) || value < 0) {
         throw new Error(
-          "--max-depth nécessite un entier supérieur ou égal à zéro.",
+          "--max-depth must be a non-negative integer.",
         );
       }
       args.maxDepth = value;
@@ -150,12 +150,12 @@ export function parseArgs(argv = []) {
     } else if (argument === "--help" || argument === "-h") {
       args.help = true;
     } else {
-      throw new Error(`Argument inconnu: ${argument}`);
+      throw new Error(`Unknown argument: ${argument}`);
     }
   }
 
   if (cwdWasProvided && rootWasProvided) {
-    throw new Error("Utilise --cwd ou --root, pas les deux.");
+    throw new Error("Use either --cwd or --root, not both.");
   }
   if (args.json) {
     args.interactive = false;
@@ -237,10 +237,10 @@ export function discoverRepositoryRoots(
 ) {
   const absoluteRoot = safeRealPath(root);
   if (!existsSync(absoluteRoot)) {
-    throw new Error(`Le dossier racine n'existe pas: ${absoluteRoot}`);
+    throw new Error(`Root directory does not exist: ${absoluteRoot}`);
   }
   if (!lstatSync(absoluteRoot).isDirectory()) {
-    throw new Error(`La racine doit être un dossier: ${absoluteRoot}`);
+    throw new Error(`Root path must be a directory: ${absoluteRoot}`);
   }
 
   const candidates = [];
@@ -294,7 +294,7 @@ export function discoverRepositoryRoots(
     if (!metadata) {
       errors.push({
         path: candidate.path,
-        message: "Le marqueur Git ne permet pas de résoudre le dépôt.",
+        message: "The Git marker could not be resolved to a repository.",
       });
       continue;
     }
@@ -607,7 +607,7 @@ function isActiveChat(thread) {
 function normalizeChatThreads(threads) {
   return threads.map((thread) => ({
     id: thread.id ?? thread.sessionId ?? null,
-    title: thread.name ?? thread.title ?? "(sans titre)",
+    title: thread.name ?? thread.title ?? "(untitled)",
     status: statusType(thread.status) ?? "unknown",
     updatedAt: thread.updatedAt ?? thread.updated_at ?? null,
     cwd: thread.cwd ?? null,
@@ -784,7 +784,7 @@ export async function auditWorktrees({
     "--show-toplevel",
   ]);
   if (rootResult.status !== 0)
-    throw new Error("Le dossier courant n’est pas un dépôt Git.");
+    throw new Error("The current directory is not a Git repository.");
   const repoRoot = rootResult.stdout.trim();
   const listResult = runCommand("git", [
     "-C",
@@ -794,7 +794,7 @@ export async function auditWorktrees({
     "--porcelain",
   ]);
   if (listResult.status !== 0)
-    throw new Error("Impossible de lister les worktrees Git.");
+    throw new Error("Unable to list Git worktrees.");
   const worktrees = parseWorktreeList(listResult.stdout);
   onProgress({ stage: PROGRESS_STAGES.WORKTREES, total: worktrees.length });
   const repository = noGithub ? null : getRepositorySlug(repoRoot, runCommand);
@@ -1022,7 +1022,7 @@ function compactAuditLine(row) {
 export function renderAudit(audit, { color = process.stdout.isTTY } = {}) {
   const title = audit.root
     ? `workspace: ${audit.root}`
-    : (audit.repository ?? "dépôt Git local");
+    : (audit.repository ?? "local Git repository");
   const lines = [
     colorize(`\n💾 Worktree audit: ${title}`, "bold", color),
     auditSummary(audit.rows),
@@ -1033,12 +1033,12 @@ export function renderAudit(audit, { color = process.stdout.isTTY } = {}) {
   }
   lines.push(
     "",
-    "🟢 SAFE | 🟡 REVIEW | 🔴 KEEP | ⚪ UNKNOWN · --json conserve tous les détails",
+    "🟢 SAFE | 🟡 REVIEW | 🔴 KEEP | ⚪ UNKNOWN · --json keeps all details",
   );
   if (audit.errors?.length > 0) {
     lines.push(
       "",
-      `⚠️ ${audit.errors.length} erreur(s) de découverte ou d'audit:`,
+      `⚠️ ${audit.errors.length} discovery or audit error(s):`,
       ...audit.errors.map((error) => `- ${error.path}: ${error.message}`),
     );
   }

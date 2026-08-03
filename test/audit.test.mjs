@@ -276,7 +276,7 @@ detached
     assert.match(output, /PR #42 MERGED/u);
     assert.match(output, /Feature A/u);
     assert.match(output, /dirty=0/u);
-    assert.doesNotMatch(output, /dernier commit=/u);
+    assert.doesNotMatch(output, /last commit=/u);
   });
 
   it("parses safe CLI modes", () => {
@@ -310,7 +310,7 @@ detached
     );
     assert.throws(
       () => parseArgs(["--cwd", "/tmp/repo", "--root", "/tmp/projects"]),
-      /Utilise --cwd ou --root, pas les deux/u,
+      /Use either --cwd or --root, not both/u,
     );
   });
 
@@ -341,6 +341,7 @@ detached
     );
 
     assert.match(output, /Worktree Audit/u);
+    assert.match(output, /Commands:/u);
     assert.match(output, /\/delete/u);
     assert.match(output, /\*  1/u);
   });
@@ -461,7 +462,7 @@ detached
         output: { isTTY: false },
         errorOutput: { write() {} },
       }),
-      /terminal interactif \(TTY\)/u,
+      /interactive terminal \(TTY\)/u,
     );
   });
 
