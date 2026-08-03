@@ -43,9 +43,10 @@ Use `--cwd PATH` to audit one repository explicitly. `--root PATH` and
 ## Non-interactive use
 
 ```bash
-node src/cli.mjs --root ~/Projects --json
-node src/cli.mjs --cwd /path/to/repository --merged-only
-node src/cli.mjs --no-github --no-chat
+npm run build
+node dist/src/cli.js --root ~/Projects --json
+node dist/src/cli.js --cwd /path/to/repository --merged-only
+node dist/src/cli.js --no-github --no-chat
 ```
 
 The JSON mode is suitable for scripts. Multi-repository JSON includes
@@ -72,8 +73,9 @@ partial discovery without treating it as a complete scan. A non-TTY without
 ## Development
 
 ```bash
+npm run build
 npm test
 npm run check
 ```
 
-No runtime dependency is required.
+TypeScript is compiled to `dist/`. Runtime dependencies are not required.

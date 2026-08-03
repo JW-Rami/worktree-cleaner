@@ -25,19 +25,27 @@ import {
   repositoryFromRemote,
   removeWorktree,
   renderAudit,
-} from "../src/audit.mjs";
+  type AggregateAudit,
+  type AuditRow,
+  type ChatEvidence,
+  type CommandResult,
+  type ProgressEvent,
+  type PullRequest,
+  type PullRequestEvidence,
+  type WorktreeState,
+} from "../src/audit.js";
 import {
   executeDeletion,
   parseInteractiveCommand,
   parseSelection,
   renderInteractive,
   runCli,
-} from "../src/cli.mjs";
+} from "../src/cli.js";
 
 const mergedHead = "a".repeat(40);
 const staleHead = "b".repeat(40);
 
-function state(overrides = {}) {
+function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
   return {
     path: "/tmp/worktree-a",
     branch: "rami/feature-a",
@@ -54,7 +62,7 @@ function state(overrides = {}) {
   };
 }
 
-function pullRequest(overrides = {}) {
+function pullRequest(overrides: Partial<PullRequest> = {}): PullRequest {
   return {
     number: 42,
     state: "MERGED",
@@ -137,7 +145,7 @@ detached
         { repoRoot: ignoredRepo, commonDir: join(ignoredRepo, ".git") },
       ],
     ]);
-    const runCommand = (_command, args) => {
+    const runCommand = (_command: string, args: string[]): CommandResult => {
       const candidate = metadata.get(args[1]);
       if (!candidate) return { status: 1, stdout: "", stderr: "not a repo" };
       return {
@@ -159,10 +167,15 @@ detached
         runCommand,
         noGithub: true,
         noChat: true,
-        auditRepository: async ({ cwd }) => ({
+        auditRepository: async ({ cwd = "" }) => ({
           repoRoot: cwd,
           repository: null,
-          rows: [{ path: join(cwd, "worktree"), decision: "UNKNOWN" }],
+          rows: [
+            {
+              path: join(cwd, "worktree"),
+              decision: "UNKNOWN",
+            } as AuditRow,
+          ],
         }),
       });
       assert.deepEqual(
@@ -180,11 +193,14 @@ detached
   });
 
   it("does not select a dirty or active worktree for removal", () => {
-    const mergedChat = {
+    const mergedChat: ChatEvidence = {
       kind: "EXACT",
       threads: [{ id: "chat-1", title: "Feature A", status: "idle" }],
     };
-    const mergedPr = { kind: "MERGED_EXACT", pullRequest: pullRequest() };
+    const mergedPr: PullRequestEvidence = {
+      kind: "MERGED_EXACT",
+      pullRequest: pullRequest(),
+    };
     const candidate = buildAuditRow({
       state: state(),
       pr: mergedPr,
@@ -251,10 +267,10 @@ detached
     );
 
     assert.deepEqual(
-      chats.get("/tmp/worktree-a").threads.map((thread) => thread.id),
+      chats.get("/tmp/worktree-a")!.threads.map((thread) => thread.id),
       ["chat-a"],
     );
-    assert.equal(chats.get("/tmp/worktree-b").kind, "NO_CHAT");
+    assert.equal(chats.get("/tmp/worktree-b")!.kind, "NO_CHAT");
   });
 
   it("renders the evidence fields needed to review a deletion", () => {
@@ -268,7 +284,11 @@ detached
       mainPath: "/repo",
     });
     const output = renderAudit(
-      { repository: "The-JW-Corp/Invisible", rows: [row] },
+      {
+        repoRoot: "/repo",
+        repository: "The-JW-Corp/Invisible",
+        rows: [row],
+      },
       { color: false },
     );
 
@@ -336,7 +356,11 @@ detached
       mainPath: "/repo",
     });
     const output = renderInteractive(
-      { repository: "The-JW-Corp/Invisible", rows: [row] },
+      {
+        repoRoot: "/repo",
+        repository: "The-JW-Corp/Invisible",
+        rows: [row],
+      },
       { selected: new Set([row.path]) },
     );
 
@@ -356,14 +380,18 @@ detached
       },
       mainPath: "/repo",
     });
-    const calls = [];
+    const calls: Array<Record<string, unknown>> = [];
     const result = await executeDeletion({
-      audit: { repoRoot: "/repo", rows: [row] },
+      audit: { repoRoot: "/repo", repository: null, rows: [row] },
       paths: [row.path],
       args: { cwd: "/repo", noGithub: false, noChat: false },
       output: { write() {} },
       errorOutput: { write() {} },
-      auditFn: async () => ({ repoRoot: "/repo", rows: [row] }),
+      auditFn: async () => ({
+        repoRoot: "/repo",
+        repository: null,
+        rows: [row],
+      }),
       verifyFn({ repoRoot, row: verifiedRow }) {
         calls.push({
           repoRoot,
@@ -402,12 +430,17 @@ detached
       mainPath: "/repo-b",
     });
     const rows = [
-      { ...firstRow, repoRoot: "/repo-a" },
-      { ...secondRow, repoRoot: "/repo-b" },
+      { ...firstRow, repoRoot: "/repo-a", repository: null },
+      { ...secondRow, repoRoot: "/repo-b", repository: null },
     ];
-    const calls = [];
+    const calls: Array<Record<string, unknown>> = [];
     const result = await executeDeletion({
-      audit: { root: "/workspace", rows },
+      audit: {
+        root: "/workspace",
+        repositories: [],
+        rows,
+        errors: [],
+      },
       paths: rows.map((row) => row.path),
       args: {
         cwd: process.cwd(),
@@ -418,7 +451,12 @@ detached
       },
       output: { write() {} },
       errorOutput: { write() {} },
-      rootAuditFn: async () => ({ root: "/workspace", rows }),
+      rootAuditFn: async (): Promise<AggregateAudit> => ({
+        root: "/workspace",
+        repositories: [],
+        rows,
+        errors: [],
+      }),
       verifyFn({ repoRoot, row }) {
         calls.push({ action: "verify", repoRoot, path: row.path });
         return true;
@@ -459,7 +497,7 @@ detached
       runCli({
         argv: ["--interactive"],
         input: { isTTY: false },
-        output: { isTTY: false },
+        output: { isTTY: false, write: () => true },
         errorOutput: { write() {} },
       }),
       /interactive terminal \(TTY\)/u,
@@ -467,7 +505,7 @@ detached
   });
 
   it("parses aggregate du output without requiring one command per worktree", () => {
-    const progress = [];
+    const progress: ProgressEvent[] = [];
     const sizes = measureWorktreeSizes(
       [{ path: process.cwd() }, { path: "/missing" }],
       () => ({
@@ -486,11 +524,11 @@ detached
   });
 
   it("removes only the exact selected worktree through Git", () => {
-    const calls = [];
+    const calls: Array<{ command: string; args: string[] }> = [];
     const result = removeWorktree({
       repoRoot: "/repo",
       path: "/tmp/worktree-a",
-      runCommand(command, args) {
+      runCommand(command: string, args: string[]) {
         calls.push({ command, args });
         return { status: 0, stdout: "", stderr: "" };
       },

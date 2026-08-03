@@ -3,20 +3,84 @@
 import { createInterface } from "node:readline";
 
 import {
+  type AggregateAudit,
+  type Audit,
+  type AuditRepositoriesFunction,
+  type AuditRow,
+  type AuditWorktreeOptions,
   auditRepositories,
   auditWorktrees,
+  type CliArgs,
+  type CommandResult,
+  DEFAULT_DISCOVERY_MAX_DEPTH,
   DECISIONS,
   parseArgs,
+  type ProgressEvent,
+  type RemovalTargetOptions,
   removeWorktree,
   renderAudit,
   verifyRemovalTarget,
-} from "./audit.mjs";
+} from "./audit.js";
+
+interface CliInput {
+  isTTY?: boolean;
+}
+
+type ReadableCliInput = NodeJS.ReadableStream & CliInput;
+
+interface CliOutput {
+  isTTY?: boolean;
+  write(chunk: string): unknown;
+}
+
+type Filter = "all" | "safe" | "review" | "unknown";
+type AuditArgs = Pick<CliArgs, "cwd"> & Partial<Omit<CliArgs, "cwd">>;
+type AuditFunction = (
+  options: AuditWorktreeOptions,
+) => Promise<Exclude<Audit, AggregateAudit>>;
+type RemoveFunction = (options: {
+  repoRoot: string;
+  path: string;
+}) => CommandResult;
+type VerifyFunction = (options: RemovalTargetOptions) => boolean;
+
+interface SharedExecutionOptions {
+  args: AuditArgs;
+  output: CliOutput;
+  errorOutput: CliOutput;
+  auditFn?: AuditFunction;
+  rootAuditFn?: AuditRepositoriesFunction;
+  removeFn?: RemoveFunction;
+  verifyFn?: VerifyFunction;
+}
+
+interface DeletionOptions extends SharedExecutionOptions {
+  audit: Audit;
+  paths: Iterable<string>;
+}
+
+interface InteractiveSessionOptions extends SharedExecutionOptions {
+  audit: Audit;
+  input?: CliInput;
+}
+
+interface RunCliOptions {
+  argv?: string[];
+  input?: CliInput;
+  output?: CliOutput;
+  errorOutput?: CliOutput;
+}
 
 const DELETE_CONFIRMATION = "DELETE";
 const PROMPT = "audit> ";
-const DEFAULT_FILTER = "all";
-const SAFE_FILTER = "safe";
-const FILTERS = new Set([DEFAULT_FILTER, SAFE_FILTER, "review", "unknown"]);
+const DEFAULT_FILTER: Filter = "all";
+const SAFE_FILTER: Filter = "safe";
+const FILTERS: ReadonlySet<Filter> = new Set([
+  DEFAULT_FILTER,
+  SAFE_FILTER,
+  "review",
+  "unknown",
+]);
 const VERSION = "0.2.0";
 const MAX_PREVIEW_ROWS = 20;
 
@@ -40,8 +104,8 @@ SAFE rows are the only selectable rows. Deletion requires the exact DELETE
 confirmation and a second Git/process validation.
 `;
 
-function progressWriter(errorOutput) {
-  return (progress) => {
+function progressWriter(errorOutput: CliOutput): (progress: ProgressEvent) => void {
+  return (progress: ProgressEvent): void => {
     const scope = progress.repositoryIndex
       ? `[${progress.repositoryIndex}/${progress.repositoryTotal}] ${progress.repositoryRoot} · `
       : "";
@@ -63,7 +127,7 @@ function progressWriter(errorOutput) {
   };
 }
 
-function rowMatchesFilter(row, filter) {
+function rowMatchesFilter(row: AuditRow, filter: Filter): boolean {
   if (filter === DEFAULT_FILTER) return true;
   if (filter === SAFE_FILTER)
     return row.decision === DECISIONS.REMOVE_CANDIDATE;
@@ -71,24 +135,28 @@ function rowMatchesFilter(row, filter) {
   return row.decision === DECISIONS.UNKNOWN;
 }
 
-function visibleRows(audit, filter) {
+function visibleRows(audit: Audit, filter: Filter): AuditRow[] {
   return audit.rows.filter((row) => rowMatchesFilter(row, filter));
 }
 
-function rowIndexMap(rows) {
+function rowIndexMap(rows: AuditRow[]): Map<number, AuditRow> {
   return new Map(rows.map((row, index) => [index + 1, row]));
 }
 
-function safeRows(rows) {
+function safeRows(rows: AuditRow[]): AuditRow[] {
   return rows.filter((row) => row.decision === DECISIONS.REMOVE_CANDIDATE);
 }
 
-function auditTitle(audit) {
-  if (audit.root) return `workspace: ${audit.root}`;
+function isFilter(value: string): value is Filter {
+  return FILTERS.has(value as Filter);
+}
+
+function auditTitle(audit: Audit): string {
+  if ("root" in audit) return `workspace: ${audit.root}`;
   return audit.repository ?? "local Git repository";
 }
 
-function formatRow(row, index, selected) {
+function formatRow(row: AuditRow, index: number, selected: Set<string>): string {
   const selectedMarker = selected.has(row.path) ? "*" : " ";
   const repositoryLabel = row.repository ?? row.repoRoot;
   const scope = repositoryLabel ? `[${repositoryLabel}] ` : "";
@@ -102,9 +170,12 @@ function formatRow(row, index, selected) {
 }
 
 export function renderInteractive(
-  audit,
-  { selected = new Set(), filter = DEFAULT_FILTER } = {},
-) {
+  audit: Audit,
+  {
+    selected = new Set<string>(),
+    filter = DEFAULT_FILTER,
+  }: { selected?: Set<string>; filter?: Filter } = {},
+): string {
   const rows = visibleRows(audit, filter);
   const safeCount = safeRows(audit.rows).length;
   const selectedCount = audit.rows.filter((row) =>
@@ -120,14 +191,20 @@ export function renderInteractive(
     lines.push("No rows for this filter.");
   } else {
     rows.forEach((row) =>
-      lines.push(formatRow(row, audit.rows.indexOf(row) + 1, selected)),
+      lines.push(
+        formatRow(
+          row,
+          audit.rows.findIndex((candidate) => candidate.path === row.path) + 1,
+          selected,
+        ),
+      ),
     );
   }
   lines.push(
     "",
     "* selected · SAFE selectable · REVIEW/UNKNOWN kept by default",
   );
-  if (audit.errors?.length > 0) {
+  if ("errors" in audit && audit.errors.length > 0) {
     lines.push(
       "",
       `⚠️ ${audit.errors.length} error(s): ${audit.errors
@@ -138,7 +215,7 @@ export function renderInteractive(
   return lines.join("\n");
 }
 
-function parseIndexToken(token, maxIndex) {
+function parseIndexToken(token: string, maxIndex: number): number[] {
   const range = token.match(/^(\d+)-(\d+)$/u);
   if (range) {
     const start = Number.parseInt(range[1], 10);
@@ -155,13 +232,16 @@ function parseIndexToken(token, maxIndex) {
     : [];
 }
 
-export function parseSelection(value, maxIndex) {
+export function parseSelection(
+  value: unknown,
+  maxIndex: number,
+): { indexes: number[]; invalid: string[] } {
   const tokens = String(value ?? "")
     .split(/[\s,]+/u)
     .map((token) => token.trim())
     .filter(Boolean);
-  const indexes = new Set();
-  const invalid = [];
+  const indexes = new Set<number>();
+  const invalid: string[] = [];
   for (const token of tokens) {
     const parsed = parseIndexToken(token, maxIndex);
     if (parsed.length === 0) invalid.push(token);
@@ -170,7 +250,10 @@ export function parseSelection(value, maxIndex) {
   return { indexes: [...indexes].sort((left, right) => left - right), invalid };
 }
 
-export function parseInteractiveCommand(line) {
+export function parseInteractiveCommand(line: unknown): {
+  command: string;
+  argument: string;
+} {
   const value = String(line ?? "").trim();
   if (!value) return { command: "noop", argument: "" };
   const normalized = value.startsWith("/") ? value.slice(1) : value;
@@ -178,12 +261,12 @@ export function parseInteractiveCommand(line) {
   return { command: command.toLowerCase(), argument: rest.join(" ") };
 }
 
-function selectedRows(audit, selected) {
+function selectedRows(audit: Audit, selected: Set<string>): AuditRow[] {
   return audit.rows.filter((row) => selected.has(row.path));
 }
 
-function filterMergedOnly(audit) {
-  if (!audit.repositories) {
+function filterMergedOnly(audit: Audit): Audit {
+  if (!("repositories" in audit)) {
     return {
       ...audit,
       rows: audit.rows.filter((row) => row.pr.kind === "MERGED_EXACT"),
@@ -200,7 +283,7 @@ function filterMergedOnly(audit) {
   };
 }
 
-function printPreview(output, rows) {
+function printPreview(output: CliOutput, rows: AuditRow[]): void {
   output.write(`\nDeletion preview (${rows.length}):\n`);
   rows.slice(0, MAX_PREVIEW_ROWS).forEach((row) => {
     const scope = row.repository ?? row.repoRoot;
@@ -214,23 +297,23 @@ function printPreview(output, rows) {
 }
 
 async function collectAudit(
-  args,
-  errorOutput,
-  auditFn = auditWorktrees,
-  rootAuditFn = auditRepositories,
-) {
-  const options = {
+  args: AuditArgs,
+  errorOutput: CliOutput,
+  auditFn: AuditFunction = auditWorktrees,
+  rootAuditFn: AuditRepositoriesFunction = auditRepositories,
+): Promise<Audit> {
+  const options: AuditWorktreeOptions = {
     cwd: args.cwd,
-    noGithub: args.noGithub,
-    noChat: args.noChat,
-    deepProcessScan: args.deepProcessScan,
+    noGithub: args.noGithub ?? false,
+    noChat: args.noChat ?? false,
+    deepProcessScan: args.deepProcessScan ?? false,
     onProgress: progressWriter(errorOutput),
   };
   return args.root
     ? rootAuditFn({
         ...options,
         root: args.root,
-        maxDepth: args.maxDepth,
+        maxDepth: args.maxDepth ?? DEFAULT_DISCOVERY_MAX_DEPTH,
       })
     : auditFn(options);
 }
@@ -241,11 +324,11 @@ export async function executeDeletion({
   args,
   output,
   errorOutput,
-  auditFn,
-  rootAuditFn,
-  removeFn,
-  verifyFn,
-}) {
+  auditFn = auditWorktrees,
+  rootAuditFn = auditRepositories,
+  removeFn = removeWorktree,
+  verifyFn = verifyRemovalTarget,
+}: DeletionOptions): Promise<{ audit: Audit; removed: number }> {
   const latestAudit = await collectAudit(
     { ...args, deepProcessScan: true },
     errorOutput,
@@ -256,7 +339,8 @@ export async function executeDeletion({
   let removed = 0;
   for (const path of paths) {
     const row = latestRows.get(path);
-    const repoRoot = row?.repoRoot ?? audit.repoRoot;
+    const repoRoot =
+      row?.repoRoot ?? ("repoRoot" in audit ? audit.repoRoot : undefined);
     if (
       !row ||
       row.decision !== DECISIONS.REMOVE_CANDIDATE ||
@@ -287,11 +371,11 @@ export async function runInteractiveSession({
   rootAuditFn = auditRepositories,
   removeFn = removeWorktree,
   verifyFn = verifyRemovalTarget,
-} = {}) {
+}: InteractiveSessionOptions): Promise<number> {
   let currentAudit = audit;
   let filter = DEFAULT_FILTER;
-  let selected = new Set();
-  let pendingDeletion = null;
+  let selected = new Set<string>();
+  let pendingDeletion: Set<string> | null = null;
   let closed = false;
 
   const show = () => {
@@ -303,8 +387,8 @@ export async function runInteractiveSession({
     output.write("\nSession ended.\n");
   };
   const readline = createInterface({
-    input,
-    output,
+    input: input as NodeJS.ReadableStream,
+    output: output as NodeJS.WritableStream,
     terminal: Boolean(input.isTTY && output.isTTY),
     prompt: PROMPT,
   });
@@ -312,12 +396,12 @@ export async function runInteractiveSession({
   show();
   readline.prompt();
 
-  return new Promise((resolve) => {
+  return new Promise<number>((resolve) => {
     readline.on("close", () => {
       finish();
       resolve(0);
     });
-    readline.on("line", async (line) => {
+    readline.on("line", async (line: string) => {
       readline.pause();
       try {
         const value = String(line ?? "").trim();
@@ -367,7 +451,7 @@ export async function runInteractiveSession({
           show();
         } else if (parsed.command === "filter") {
           const nextFilter = parsed.argument || DEFAULT_FILTER;
-          if (!FILTERS.has(nextFilter)) {
+          if (!isFilter(nextFilter)) {
             output.write(
               `Unknown filter: ${nextFilter}. Values: ${[...FILTERS].join(", ")}\n`,
             );
@@ -461,7 +545,7 @@ export async function runCli({
   input = process.stdin,
   output = process.stdout,
   errorOutput = process.stderr,
-} = {}) {
+}: RunCliOptions = {}): Promise<number> {
   const args = parseArgs(argv);
   if (args.help) {
     output.write("Usage: worktree-audit [options]\n");
