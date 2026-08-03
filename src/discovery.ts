@@ -10,7 +10,9 @@ import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_AUDIT_CONCURRENCY,
   DEFAULT_DISCOVERY_MAX_DEPTH,
+  DEFAULT_WORKTREE_CONCURRENCY,
   MAX_AUDIT_CONCURRENCY,
+  MAX_WORKTREE_CONCURRENCY,
   type AuditError,
   type CliArgs,
   type CommandRunner,
@@ -40,6 +42,7 @@ export function parseArgs(argv: string[] = []): CliArgs {
     all: false,
     maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
     concurrency: DEFAULT_AUDIT_CONCURRENCY,
+    worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
     json: false,
     interactive: false,
     mergedOnly: false,
@@ -81,6 +84,18 @@ export function parseArgs(argv: string[] = []): CliArgs {
         );
       }
       args.concurrency = value;
+    } else if (argument === "--worktree-concurrency") {
+      const value = Number(argv[++index] ?? "");
+      if (
+        !Number.isInteger(value) ||
+        value < 1 ||
+        value > MAX_WORKTREE_CONCURRENCY
+      ) {
+        throw new Error(
+          `--worktree-concurrency must be an integer between 1 and ${MAX_WORKTREE_CONCURRENCY}.`,
+        );
+      }
+      args.worktreeConcurrency = value;
     } else if (argument === "--json") {
       args.json = true;
     } else if (argument === "--interactive" || argument === "-i") {

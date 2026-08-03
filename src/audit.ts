@@ -3,8 +3,11 @@ import { existsSync } from "node:fs";
 import {
   DEFAULT_AUDIT_CONCURRENCY,
   DEFAULT_DISCOVERY_MAX_DEPTH,
+  DEFAULT_WORKTREE_CONCURRENCY,
   MAX_AUDIT_CONCURRENCY,
+  MAX_WORKTREE_CONCURRENCY,
   PROGRESS_STAGES,
+  type AsyncCommandRunner,
   type AggregateAudit,
   type AggregateRow,
   type AuditError,
@@ -21,7 +24,8 @@ import {
   type Worktree,
   type WorktreeState,
 } from "./domain.js";
-import { commandResult } from "./command.js";
+import { commandResult, commandResultAsync } from "./command.js";
+import { mapWithConcurrency } from "./concurrency.js";
 import {
   discoverRepositoryRoots,
   defaultWorkspaceRoot,
@@ -39,8 +43,8 @@ import {
 } from "./github.js";
 import { buildAuditRow } from "./policy.js";
 import {
-  collectWorktreeState,
-  measureWorktreeSizes,
+  collectWorktreeStateAsync,
+  measureWorktreeSizesAsync,
   processCountForPath,
   scanProcessCwds,
 } from "./worktree.js";
@@ -49,7 +53,9 @@ export {
   DEFAULT_AUDIT_CONCURRENCY,
   DECISIONS,
   DEFAULT_DISCOVERY_MAX_DEPTH,
+  DEFAULT_WORKTREE_CONCURRENCY,
   MAX_AUDIT_CONCURRENCY,
+  MAX_WORKTREE_CONCURRENCY,
   PROGRESS_STAGES,
 } from "./domain.js";
 export type {
@@ -67,6 +73,7 @@ export type {
   ChatLookup,
   ChatThread,
   CliArgs,
+  AsyncCommandRunner,
   CommandOptions,
   CommandResult,
   CommandRunner,
@@ -84,7 +91,7 @@ export type {
   Worktree,
   WorktreeState,
 } from "./domain.js";
-export { commandResult } from "./command.js";
+export { commandResult, commandResultAsync } from "./command.js";
 export {
   discoverRepositoryRoots,
   defaultWorkspaceRoot,
@@ -99,7 +106,9 @@ export {
 export { buildAuditRow } from "./policy.js";
 export {
   defaultSelection,
+  collectWorktreeStateAsync,
   measureWorktreeSizes,
+  measureWorktreeSizesAsync,
   removeWorktree,
   verifyRemovalTarget,
 } from "./worktree.js";
@@ -108,7 +117,7 @@ export { renderAudit } from "./audit-render.js";
 interface AuditContext {
   repoRoot: string;
   repository: string | null;
-  runCommand: CommandRunner;
+  asyncRunCommand: AsyncCommandRunner;
   processPaths: Map<string, Set<string>> | null;
   sizes: Map<string, number>;
   pullRequests: PullRequest[] | null;
@@ -143,19 +152,23 @@ async function prepareAuditContext({
   repoRoot,
   worktrees,
   runCommand,
+  asyncRunCommand,
   chatLookup,
   noGithub,
   noChat,
   deepProcessScan,
+  worktreeConcurrency,
   onProgress,
 }: {
   repoRoot: string;
   worktrees: Worktree[];
   runCommand: CommandRunner;
+  asyncRunCommand: AsyncCommandRunner;
   chatLookup?: ChatLookup;
   noGithub: boolean;
   noChat: boolean;
   deepProcessScan: boolean;
+  worktreeConcurrency: number;
   onProgress: ProgressHandler;
 }): Promise<AuditContext> {
   const repository = noGithub
@@ -167,7 +180,12 @@ async function prepareAuditContext({
 
   onProgress({ stage: PROGRESS_STAGES.PROCESSES });
   const processPaths = deepProcessScan ? null : scanProcessCwds(runCommand);
-  const sizes = measureWorktreeSizes(worktrees, runCommand, onProgress);
+  const sizes = await measureWorktreeSizesAsync(
+    worktrees,
+    asyncRunCommand,
+    onProgress,
+    worktreeConcurrency,
+  );
 
   onProgress({ stage: PROGRESS_STAGES.GITHUB });
   const pullRequests = noGithub
@@ -188,7 +206,7 @@ async function prepareAuditContext({
   return {
     repoRoot,
     repository,
-    runCommand,
+    asyncRunCommand,
     processPaths,
     sizes,
     pullRequests,
@@ -199,14 +217,14 @@ async function prepareAuditContext({
   };
 }
 
-function auditWorktreeRow(
+async function auditWorktreeRow(
   worktree: Worktree,
   context: AuditContext,
   {
     noGithub,
     deepProcessScan,
   }: { noGithub: boolean; deepProcessScan: boolean },
-): AuditRow {
+): Promise<AuditRow> {
   const chat = context.chatsByPath.get(worktree.path) ?? unknownChatEvidence();
   if (!existsSync(worktree.path)) {
     return buildAuditRow({
@@ -217,8 +235,8 @@ function auditWorktreeRow(
     });
   }
 
-  const state = collectWorktreeState(worktree, {
-    runCommand: context.runCommand,
+  const state = await collectWorktreeStateAsync(worktree, {
+    runCommand: context.asyncRunCommand,
     deepProcessScan,
     openProcessCount: processCountForPath(
       context.processPaths,
@@ -235,12 +253,23 @@ function auditWorktreeRow(
 export async function auditWorktrees({
   cwd = process.cwd(),
   runCommand = commandResult,
+  asyncRunCommand = commandResultAsync,
   chatLookup,
   noGithub = false,
   noChat = false,
   deepProcessScan = false,
+  worktreeConcurrency = DEFAULT_WORKTREE_CONCURRENCY,
   onProgress = () => {},
 }: AuditWorktreeOptions = {}): Promise<SingleAudit> {
+  if (
+    !Number.isInteger(worktreeConcurrency) ||
+    worktreeConcurrency < 1 ||
+    worktreeConcurrency > MAX_WORKTREE_CONCURRENCY
+  ) {
+    throw new Error(
+      `worktree concurrency must be an integer between 1 and ${MAX_WORKTREE_CONCURRENCY}.`,
+    );
+  }
   const rootResult = runCommand("git", [
     "-C",
     cwd,
@@ -265,14 +294,19 @@ export async function auditWorktrees({
     repoRoot,
     worktrees,
     runCommand,
+    asyncRunCommand,
     chatLookup,
     noGithub,
     noChat,
     deepProcessScan,
+    worktreeConcurrency,
     onProgress,
   });
-  const rows = worktrees.map((worktree) =>
-    auditWorktreeRow(worktree, context, { noGithub, deepProcessScan }),
+  const rows = await mapWithConcurrency(
+    worktrees,
+    worktreeConcurrency,
+    (worktree) =>
+      auditWorktreeRow(worktree, context, { noGithub, deepProcessScan }),
   );
   return { repoRoot, repository: context.repository, rows };
 }
@@ -312,6 +346,7 @@ export async function auditRepositories({
   noChat = false,
   deepProcessScan = false,
   concurrency = DEFAULT_AUDIT_CONCURRENCY,
+  worktreeConcurrency = DEFAULT_WORKTREE_CONCURRENCY,
   onProgress = () => {},
 }: AuditRepositoriesOptions = {}): Promise<AggregateAudit> {
   if (
@@ -321,6 +356,15 @@ export async function auditRepositories({
   ) {
     throw new Error(
       `concurrency must be an integer between 1 and ${MAX_AUDIT_CONCURRENCY}.`,
+    );
+  }
+  if (
+    !Number.isInteger(worktreeConcurrency) ||
+    worktreeConcurrency < 1 ||
+    worktreeConcurrency > MAX_WORKTREE_CONCURRENCY
+  ) {
+    throw new Error(
+      `worktree concurrency must be an integer between 1 and ${MAX_WORKTREE_CONCURRENCY}.`,
     );
   }
   const discovery = discoverRepositoryRoots(root, { runCommand, maxDepth });
@@ -352,6 +396,7 @@ export async function auditRepositories({
           noGithub,
           noChat,
           deepProcessScan,
+          worktreeConcurrency,
           onProgress: repositoryProgress(
             onProgress,
             index + 1,

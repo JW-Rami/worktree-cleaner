@@ -2,7 +2,10 @@ import { existsSync } from "node:fs";
 
 import {
   DECISIONS,
+  DEFAULT_WORKTREE_CONCURRENCY,
+  MAX_WORKTREE_CONCURRENCY,
   PROGRESS_STAGES,
+  type AsyncCommandRunner,
   type AuditRow,
   type CommandResult,
   type CommandRunner,
@@ -11,7 +14,8 @@ import {
   type Worktree,
   type WorktreeState,
 } from "./domain.js";
-import { commandResult, nonEmptyLines } from "./command.js";
+import { commandResult, commandResultAsync, nonEmptyLines } from "./command.js";
+import { mapWithConcurrency } from "./concurrency.js";
 import { parseWorktreeList } from "./discovery.js";
 
 const SIZE_BATCH_SIZE = 12;
@@ -30,6 +34,13 @@ const REBUILDABLE_IGNORED_NAMES = new Set([
 
 interface WorktreeStateOptions {
   runCommand?: CommandRunner;
+  openProcessCount?: number | null;
+  deepProcessScan?: boolean;
+  sizeKib?: number | null;
+}
+
+interface AsyncWorktreeStateOptions {
+  runCommand?: AsyncCommandRunner;
   openProcessCount?: number | null;
   deepProcessScan?: boolean;
   sizeKib?: number | null;
@@ -179,6 +190,68 @@ export function collectWorktreeState(
   };
 }
 
+export async function collectWorktreeStateAsync(
+  worktree: Worktree,
+  {
+    runCommand = commandResultAsync,
+    openProcessCount = null,
+    deepProcessScan = false,
+    sizeKib,
+  }: AsyncWorktreeStateOptions = {},
+): Promise<WorktreeState> {
+  const [status, ignored, lastCommit, size, openFiles] = await Promise.all([
+    runCommand("git", [
+      "-C",
+      worktree.path,
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ]),
+    runCommand("git", [
+      "-C",
+      worktree.path,
+      "status",
+      "--porcelain=v1",
+      "--ignored",
+      "--untracked-files=all",
+    ]),
+    runCommand("git", [
+      "-C",
+      worktree.path,
+      "show",
+      "-s",
+      "--format=%cI%x09%s",
+      worktree.head ?? "",
+    ]),
+    sizeKib === undefined
+      ? runCommand("du", ["-sk", worktree.path])
+      : Promise.resolve(null),
+    deepProcessScan
+      ? runCommand("lsof", ["-F", "p", "+D", worktree.path])
+      : Promise.resolve(null),
+  ]);
+  const ignoredState =
+    ignored.status === 0 ? ignoredDetails(ignored.stdout) : null;
+
+  return {
+    ...worktree,
+    head: worktree.head ?? "",
+    branch: worktree.branch ?? null,
+    detached: worktree.detached ?? false,
+    dirtyCount: status.status === 0 ? countStatusEntries(status.stdout) : null,
+    ignoredCount: ignoredState?.count ?? null,
+    ignoredRebuildableCount: ignoredState?.rebuildableCount ?? null,
+    ignoredUnknownCount: ignoredState?.unknownCount ?? null,
+    sizeKib: sizeKib === undefined ? parseSize(size?.stdout ?? "") : sizeKib,
+    lastCommit: parseLastCommit(lastCommit.stdout),
+    openProcessCount: deepProcessScan
+      ? openFiles
+        ? countOpenProcesses(openFiles)
+        : null
+      : openProcessCount,
+  };
+}
+
 export function measureWorktreeSizes(
   worktrees: Worktree[],
   runCommand: CommandRunner,
@@ -217,6 +290,80 @@ export function measureWorktreeSizes(
       completed: Math.min(index + batch.length, existingWorktrees.length),
       total: existingWorktrees.length,
     });
+  }
+  return sizes;
+}
+
+export async function measureWorktreeSizesAsync(
+  worktrees: Worktree[],
+  runCommand: AsyncCommandRunner = commandResultAsync,
+  onProgress: ProgressHandler = () => {},
+  concurrency = DEFAULT_WORKTREE_CONCURRENCY,
+): Promise<Map<string, number>> {
+  if (
+    !Number.isInteger(concurrency) ||
+    concurrency < 1 ||
+    concurrency > MAX_WORKTREE_CONCURRENCY
+  ) {
+    throw new Error(
+      `worktree concurrency must be an integer between 1 and ${MAX_WORKTREE_CONCURRENCY}.`,
+    );
+  }
+  const existingWorktrees = worktrees.filter((worktree) =>
+    existsSync(worktree.path),
+  );
+  if (existingWorktrees.length === 0) return new Map();
+
+  const batches: Worktree[][] = [];
+  for (
+    let index = 0;
+    index < existingWorktrees.length;
+    index += SIZE_BATCH_SIZE
+  ) {
+    batches.push(existingWorktrees.slice(index, index + SIZE_BATCH_SIZE));
+  }
+
+  let completed = 0;
+  const results = await mapWithConcurrency(
+    batches,
+    concurrency,
+    async (batch) => {
+      const result = await runCommand("du", [
+        "-sk",
+        ...batch.map((worktree) => worktree.path),
+      ]);
+      if (result.status === 0 || result.stdout.length > 0) {
+        completed += batch.length;
+        onProgress({
+          stage: PROGRESS_STAGES.SIZES,
+          completed,
+          total: existingWorktrees.length,
+        });
+        return [result];
+      }
+
+      const individualResults = await mapWithConcurrency(
+        batch,
+        concurrency,
+        (worktree) => runCommand("du", ["-sk", worktree.path]),
+      );
+      completed += batch.length;
+      onProgress({
+        stage: PROGRESS_STAGES.SIZES,
+        completed,
+        total: existingWorktrees.length,
+      });
+      return individualResults;
+    },
+  );
+  const sizes = new Map<string, number>();
+  for (const batchResults of results) {
+    for (const result of batchResults) {
+      for (const line of nonEmptyLines(result.stdout)) {
+        const match = line.match(/^(\d+)\s+(.+)$/u);
+        if (match) sizes.set(match[2], Number.parseInt(match[1], 10));
+      }
+    }
   }
   return sizes;
 }

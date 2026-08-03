@@ -15,6 +15,12 @@ export type CommandRunner = (
   options?: CommandOptions,
 ) => CommandResult;
 
+export type AsyncCommandRunner = (
+  command: string,
+  args: string[],
+  options?: CommandOptions,
+) => Promise<CommandResult>;
+
 export const PROGRESS_STAGES = Object.freeze({
   WORKTREES: "worktrees",
   PROCESSES: "processes",
@@ -44,6 +50,7 @@ export interface CliArgs {
   all: boolean;
   maxDepth: number;
   concurrency: number;
+  worktreeConcurrency: number;
   json: boolean;
   interactive: boolean;
   mergedOnly: boolean;
@@ -175,10 +182,12 @@ export type ChatLookup = (cwd: string) => Promise<ChatEvidence>;
 export interface AuditWorktreeOptions {
   cwd?: string;
   runCommand?: CommandRunner;
+  asyncRunCommand?: AsyncCommandRunner;
   chatLookup?: ChatLookup;
   noGithub?: boolean;
   noChat?: boolean;
   deepProcessScan?: boolean;
+  worktreeConcurrency?: number;
   onProgress?: ProgressHandler;
 }
 
@@ -218,3 +227,5 @@ export type Decision = (typeof DECISIONS)[keyof typeof DECISIONS];
 export const DEFAULT_DISCOVERY_MAX_DEPTH = 8;
 export const DEFAULT_AUDIT_CONCURRENCY = 4;
 export const MAX_AUDIT_CONCURRENCY = 16;
+export const DEFAULT_WORKTREE_CONCURRENCY = 8;
+export const MAX_WORKTREE_CONCURRENCY = 32;

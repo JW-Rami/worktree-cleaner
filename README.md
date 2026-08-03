@@ -21,9 +21,11 @@ By default, the CLI uses the parent directory of the current Git repository as
 the workspace root. It recursively discovers sibling and nested repositories,
 deduplicates linked worktrees that belong to the same repository, and audits
 every repository independently. Repository audits run in parallel with a
-bounded concurrency of 4. Use `--cwd PATH` to restrict the audit to one
-repository, `--root PATH` to choose the workspace root explicitly, or
-`--concurrency N` to tune parallelism from 1 to 16.
+bounded concurrency of 4. Worktree evidence searches also run in parallel,
+with a bounded concurrency of 8. Use `--cwd PATH` to restrict the audit to one
+repository, `--root PATH` to choose the workspace root explicitly,
+`--concurrency N` to tune repository parallelism from 1 to 16, or
+`--worktree-concurrency N` to tune per-worktree searches from 1 to 32.
 
 `--all` and `-all` remain available to make the recursive workspace scan
 explicit. If the selected path is a Git repository, its parent directory is
@@ -56,7 +58,8 @@ Discovery stops at
 `node_modules`, `target`, and `dist`. Codex chats are matched independently for
 every discovered worktree unless `--no-chat` is set. Use either `--cwd` or
 `--root`, not both. Lower `--concurrency` if local GitHub or Codex tooling is
-rate-limited.
+rate-limited. Lower `--worktree-concurrency` if local Git or process scans put
+too much load on the machine.
 
 ## Non-interactive use
 
@@ -66,6 +69,7 @@ node dist/src/cli.js --root ~/Projects --json
 node dist/src/cli.js --all --cwd ~/Projects --json
 node dist/src/cli.js -all --json
 node dist/src/cli.js --all --concurrency 8
+node dist/src/cli.js --all --worktree-concurrency 16
 node dist/src/cli.js --cwd /path/to/repository
 node dist/src/cli.js --cwd /path/to/repository --merged-only
 node dist/src/cli.js --no-github --no-chat

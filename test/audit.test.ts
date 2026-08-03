@@ -12,10 +12,12 @@ import { join } from "node:path";
 
 import {
   auditRepositories,
+  auditWorktrees,
   buildAuditRow,
   DEFAULT_AUDIT_CONCURRENCY,
   defaultSelection,
   DEFAULT_DISCOVERY_MAX_DEPTH,
+  DEFAULT_WORKTREE_CONCURRENCY,
   defaultWorkspaceRoot,
   discoverRepositoryRoots,
   groupChatThreadsByCwd,
@@ -47,6 +49,7 @@ import {
 const mergedHead = "a".repeat(40);
 const staleHead = "b".repeat(40);
 const AUDIT_CONCURRENCY_TEST_DELAY_MS = 10;
+const WORKTREE_CONCURRENCY_TEST_DELAY_MS = 10;
 
 function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
   return {
@@ -312,6 +315,7 @@ detached
         all: false,
         maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
         concurrency: DEFAULT_AUDIT_CONCURRENCY,
+        worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
         json: false,
         interactive: true,
         mergedOnly: true,
@@ -329,6 +333,7 @@ detached
         all: false,
         maxDepth: 3,
         concurrency: DEFAULT_AUDIT_CONCURRENCY,
+        worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
         json: false,
         interactive: false,
         mergedOnly: false,
@@ -348,6 +353,7 @@ detached
       all: true,
       maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
       concurrency: DEFAULT_AUDIT_CONCURRENCY,
+      worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
       json: false,
       interactive: false,
       mergedOnly: false,
@@ -357,9 +363,17 @@ detached
     });
     assert.equal(parseArgs(["-all"]).all, true);
     assert.equal(parseArgs(["--concurrency", "8"]).concurrency, 8);
+    assert.equal(
+      parseArgs(["--worktree-concurrency", "16"]).worktreeConcurrency,
+      16,
+    );
     assert.throws(
       () => parseArgs(["--concurrency", "0"]),
       /--concurrency must be an integer/u,
+    );
+    assert.throws(
+      () => parseArgs(["--worktree-concurrency", "0"]),
+      /--worktree-concurrency must be an integer/u,
     );
   });
 
@@ -454,6 +468,97 @@ detached
           message: "simulated failure",
         },
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("parallelizes evidence searches inside a large repository", async () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "worktree-audit-worktree-concurrency-")),
+    );
+    const worktreePaths = [
+      join(root, "main"),
+      join(root, "worktree-a"),
+      join(root, "worktree-b"),
+      join(root, "worktree-c"),
+    ];
+    for (const path of worktreePaths) mkdirSync(path, { recursive: true });
+    const worktreeList = worktreePaths
+      .map(
+        (path, index) => {
+          const branch = index === 0 ? "main" : `worktree-${index}`;
+          return [
+            `worktree ${path}`,
+            `HEAD ${String(index).repeat(40)}`,
+            `branch refs/heads/${branch}`,
+            "",
+          ].join("\n");
+        },
+      )
+      .join("\n");
+    const runCommand = (command: string, args: string[]): CommandResult => {
+      if (command === "lsof") return { status: 0, stdout: "", stderr: "" };
+      if (args.includes("--show-toplevel")) {
+        return { status: 0, stdout: `${root}\n`, stderr: "" };
+      }
+      if (args.includes("worktree")) {
+        return { status: 0, stdout: worktreeList, stderr: "" };
+      }
+      return { status: 1, stdout: "", stderr: "unsupported command" };
+    };
+    let activeStatusSearches = 0;
+    let maxActiveStatusSearches = 0;
+    const asyncRunCommand = async (
+      command: string,
+      args: string[],
+    ): Promise<CommandResult> => {
+      if (command === "du") {
+        return {
+          status: 0,
+          stdout: args
+            .slice(1)
+            .map((path) => `1\t${path}`)
+            .join("\n"),
+          stderr: "",
+        };
+      }
+      if (
+        command === "git" &&
+        args.includes("status") &&
+        !args.includes("--ignored")
+      ) {
+        activeStatusSearches += 1;
+        maxActiveStatusSearches = Math.max(
+          maxActiveStatusSearches,
+          activeStatusSearches,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, WORKTREE_CONCURRENCY_TEST_DELAY_MS),
+        );
+        activeStatusSearches -= 1;
+      }
+      return {
+        status: 0,
+        stdout: args.includes("show")
+          ? "2026-08-04T00:00:00Z\tworktree\n"
+          : "",
+        stderr: "",
+      };
+    };
+
+    try {
+      const audit = await auditWorktrees({
+        cwd: root,
+        runCommand,
+        asyncRunCommand,
+        noGithub: true,
+        noChat: true,
+        worktreeConcurrency: 2,
+      });
+
+      assert.equal(audit.rows.length, worktreePaths.length);
+      assert.equal(maxActiveStatusSearches, 2);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
