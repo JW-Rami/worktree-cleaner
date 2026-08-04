@@ -49,8 +49,9 @@ current position as `row N/M`:
 `◆ MAIN` rows are the primary worktrees and can never be selected. `○ SAFE`
 rows are deletion candidates. `✅ SELECTED` marks rows selected for the deletion
 preview, and selected rows are green and bold in a color-capable TTY. Review
-and unknown rows stay visible but are never selectable. Press `Enter` to type a
-slash command:
+DIRTY, review, and unknown rows stay visible with `🔒` and are never
+selectable. Press `Space` only on a SAFE row to toggle its selection. Press
+`Enter` to type a slash command:
 
 ```text
 /help

@@ -76,6 +76,12 @@ const MIN_LIST_VIEWPORT_LINES = 1;
 const ANSI_GREEN = "\u001b[32m";
 const ANSI_BOLD = "\u001b[1m";
 const ANSI_RESET = "\u001b[0m";
+const SELECTION_MARKERS = Object.freeze({
+  selected: "✅",
+  safe: "○",
+  blocked: "🔒",
+  main: "◆",
+} as const);
 
 export const HELP = `
 Commands:
@@ -100,8 +106,8 @@ Keyboard:
   q                      Exit
 
 ✅ marks selected rows; selected rows are green in a color-capable TTY.
-SAFE rows are the only selectable rows. Deletion requires the exact DELETE
-confirmation and a second Git/process validation.
+🔒 marks rows that Space cannot select because they are not SAFE. Deletion
+requires the exact DELETE confirmation and a second Git/process validation.
 `;
 
 const MAX_PREVIEW_ROWS = 20;
@@ -310,12 +316,12 @@ function formatRow(
   const cursor = row.path === cursorPath ? "▶" : " ";
   const selection =
     row.decision === DECISIONS.KEEP_MAIN
-      ? "◆"
+      ? SELECTION_MARKERS.main
       : row.decision === DECISIONS.REMOVE_CANDIDATE
         ? selected.has(row.path)
-          ? "✅"
-          : "○"
-        : "·";
+          ? SELECTION_MARKERS.selected
+          : SELECTION_MARKERS.safe
+        : SELECTION_MARKERS.blocked;
   const isSelected =
     row.decision === DECISIONS.REMOVE_CANDIDATE && selected.has(row.path);
   const repositoryLabel = row.repository ?? row.repoRoot ?? "local";
@@ -522,8 +528,8 @@ export function renderInteractive(
     "",
     "↑/↓ move · space select · enter command · /help · q quit",
     "Commands: /safe /preview /delete /refresh /quit",
-    "✅ SELECTED · ○ SAFE selectable · ◆ MAIN protected",
-    "· REVIEW/UNKNOWN kept · d=dirty · o=open",
+    "✅ SELECTED · ○ SAFE selectable · 🔒 BLOCKED",
+    "◆ MAIN protected · DIRTY/REVIEW/UNKNOWN kept",
   );
   if (cursorRow) {
     lines.push(

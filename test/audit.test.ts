@@ -670,6 +670,21 @@ detached
     }
   });
 
+  it("shows non-safe rows as locked in the selection gutter", () => {
+    const dirty = buildAuditRow({
+      state: state({ path: "/tmp/dirty", dirtyCount: 1 }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const output = renderInteractive(
+      { repoRoot: "/repo", repository: null, rows: [dirty] },
+      { columns: 80, cursorPath: dirty.path },
+    );
+
+    assert.match(output, /▶\s+🔒\s+1\s+DIRTY/u);
+  });
+
   it("scrolls the terminal viewport to keep the focused row visible", () => {
     const rows = Array.from({ length: 12 }, (_, index) =>
       buildAuditRow({
@@ -785,6 +800,55 @@ detached
     assert.match(chunks.join(""), /row 10\/12 · ↑ more · ↓ more/u);
     assert.match(chunks.join(""), /▶\s+✅\s+10\s+SAFE/u);
     assert.match(chunks.join(""), /\u001b\[32m\u001b\[1m/u);
+  });
+
+  it("explains why Space cannot select a dirty row", async () => {
+    const dirty = buildAuditRow({
+      state: state({ path: "/tmp/dirty", dirtyCount: 1 }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const input = Object.assign(new EventEmitter(), {
+      isTTY: true,
+      setRawMode() {
+        return input;
+      },
+      pause() {
+        return input;
+      },
+      resume() {
+        return input;
+      },
+    });
+    const chunks: string[] = [];
+    const output = {
+      isTTY: true,
+      columns: 80,
+      rows: 16,
+      color: false,
+      write(chunk: string) {
+        chunks.push(chunk);
+        return true;
+      },
+    };
+    const session = runInteractiveSession({
+      audit: { repoRoot: "/repo", repository: null, rows: [dirty] },
+      args: { cwd: "/repo", cwdExplicit: true, noGithub: true, noChat: true },
+      input,
+      output,
+      errorOutput: output,
+    });
+
+    input.emit("data", " ");
+    input.emit("data", "q");
+
+    assert.equal(await session, 0);
+    assert.match(chunks.join(""), /▶\s+🔒\s+1\s+DIRTY/u);
+    assert.match(
+      chunks.join(""),
+      /Row \/tmp\/dirty is not SAFE and was kept\./u,
+    );
   });
 
   it("re-audits and removes only a still-safe exact worktree", async () => {
