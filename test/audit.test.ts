@@ -649,7 +649,7 @@ detached
       {
         repoRoot: main.path,
         repository: "The-JW-Corp/very-long-primary-repository-name",
-        rows: [main, linked],
+        rows: [linked, main],
       },
       {
         columns: 80,
@@ -669,6 +669,29 @@ detached
     }
   });
 
+  it("scrolls the terminal viewport to keep the focused row visible", () => {
+    const rows = Array.from({ length: 12 }, (_, index) =>
+      buildAuditRow({
+        state: state({ path: `/tmp/worktree-${index + 1}` }),
+        pr: {
+          kind: "MERGED_EXACT",
+          pullRequest: pullRequest({ number: index + 1 }),
+        },
+        chat: { kind: "EXACT", threads: [] },
+        mainPath: "/repo",
+      }),
+    );
+    const output = renderInteractive(
+      { repoRoot: "/repo", repository: null, rows },
+      { columns: 80, rows: 16, cursorPath: rows[8].path },
+    );
+
+    assert.match(output, /row 9\/12 · ↑ more · ↓ more/u);
+    assert.match(output, /▶\s+○\s+  9\s+SAFE/u);
+    assert.doesNotMatch(output, /worktree-1/u);
+    assert.equal(output.match(/▶/gu)?.length, 1);
+  });
+
   it("moves the cursor and selects a safe row with terminal keys", async () => {
     const first = buildAuditRow({
       state: state({ path: "/tmp/first" }),
@@ -685,6 +708,21 @@ detached
       chat: { kind: "EXACT", threads: [] },
       mainPath: "/repo",
     });
+    const rows = [
+      first,
+      second,
+      ...Array.from({ length: 10 }, (_, index) =>
+        buildAuditRow({
+          state: state({ path: `/tmp/worktree-${index + 3}` }),
+          pr: {
+            kind: "MERGED_EXACT",
+            pullRequest: pullRequest({ number: index + 44 }),
+          },
+          chat: { kind: "EXACT", threads: [] },
+          mainPath: "/repo",
+        }),
+      ),
+    ];
     const rawModes: boolean[] = [];
     const input = Object.assign(new EventEmitter(), {
       isTTY: true,
@@ -703,26 +741,30 @@ detached
     const output = {
       isTTY: true,
       columns: 80,
+      rows: 16,
       write(chunk: string) {
         chunks.push(chunk);
         return true;
       },
     };
     const session = runInteractiveSession({
-      audit: { repoRoot: "/repo", repository: null, rows: [first, second] },
+      audit: { repoRoot: "/repo", repository: null, rows },
       args: { cwd: "/repo", cwdExplicit: true, noGithub: true, noChat: true },
       input,
       output,
       errorOutput: output,
     });
 
-    input.emit("data", "\u001b[B");
+    for (let index = 0; index < 9; index += 1) {
+      input.emit("data", "\u001b[B");
+    }
     input.emit("data", " ");
     input.emit("data", "q");
 
     assert.equal(await session, 0);
     assert.deepEqual(rawModes, [true, false]);
-    assert.match(chunks.join(""), /●\s+2\s+SAFE/u);
+    assert.match(chunks.join(""), /row 10\/12 · ↑ more · ↓ more/u);
+    assert.match(chunks.join(""), /▶\s+●\s+10\s+SAFE/u);
   });
 
   it("re-audits and removes only a still-safe exact worktree", async () => {

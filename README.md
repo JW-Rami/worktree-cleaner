@@ -38,7 +38,9 @@ npm start -- --all --root ~/Projects
 
 The default TTY experience is an interactive dashboard. It separates primary
 worktrees from linked worktrees, shortens long paths to the terminal width, and
-uses a cursor instead of requiring row numbers:
+uses a left cursor instead of requiring row numbers. The list is a viewport
+inside the terminal: moving the cursor automatically scrolls it and shows the
+current position as `row N/M`:
 
 ```text
 ↑/↓ move · space select · enter command · /help · q quit
@@ -94,7 +96,7 @@ partial discovery without treating it as a complete scan. A non-TTY without
 | `/help`        | Show the command reference         |
 | `/list`        | Show the current dashboard         |
 | `/filter safe` | Show only deletion candidates      |
-| `/select 2,4`  | Select safe rows by number         |
+| `/select 2,4`  | Select visible SAFE rows by number |
 | `/safe`        | Select all safe rows               |
 | `/clear`       | Clear the selection                |
 | `/preview`     | Review the exact paths and commits |
@@ -104,7 +106,8 @@ partial discovery without treating it as a complete scan. A non-TTY without
 | `/quit`        | Exit without deleting              |
 
 Arrow-key selection is equivalent to `/select`: focus a row with `↑` or `↓`,
-press `Space` to toggle a SAFE row, then use `/preview` and `/delete`.
+press `Space` to toggle a SAFE row, then use `/preview` and `/delete`. Row
+numbers follow the current visible order and can change when a filter changes.
 
 ## Development
 

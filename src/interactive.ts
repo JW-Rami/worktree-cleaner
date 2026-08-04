@@ -3,6 +3,7 @@ import { DECISIONS, type Audit, type AuditRow } from "./domain.js";
 export interface CliOutput {
   isTTY?: boolean;
   columns?: number;
+  rows?: number;
   write(chunk: string): unknown;
 }
 
@@ -53,6 +54,7 @@ const TERMINAL_KEY_SEQUENCES: ReadonlyArray<readonly [string, TerminalKey]> = [
 ];
 
 const DEFAULT_TERMINAL_COLUMNS = 100;
+export const DEFAULT_TERMINAL_ROWS = 24;
 const MIN_TERMINAL_COLUMNS = 80;
 const INDEX_COLUMN_WIDTH = 3;
 const STATUS_COLUMN_WIDTH = 7;
@@ -61,13 +63,21 @@ const MIN_REPOSITORY_COLUMN_WIDTH = 12;
 const MIN_EVIDENCE_COLUMN_WIDTH = 14;
 const MIN_ACTIVITY_COLUMN_WIDTH = 10;
 const MIN_PATH_COLUMN_WIDTH = 18;
+const MIN_TERMINAL_ROWS = 8;
+const DASHBOARD_HEADER_LINE_COUNT = 3;
+const DASHBOARD_SCROLL_LINE_COUNT = 1;
+const DASHBOARD_FOOTER_LINE_COUNT = 5;
+const DASHBOARD_FOCUS_LINE_COUNT = 2;
+const DASHBOARD_ERROR_LINE_COUNT = 2;
+const DASHBOARD_PROMPT_LINE_COUNT = 2;
+const MIN_LIST_VIEWPORT_LINES = 1;
 
 export const HELP = `
 Commands:
   /help                  Show this help
   /list                  Show visible worktrees
   /filter <name>         Filter: all, safe, review, unknown
-  /select <n,...>        Select safe rows
+  /select <n,...>        Select visible SAFE rows by number
   /safe                  Select all SAFE rows
   /clear                 Clear the selection
   /preview               Preview deletion
@@ -103,7 +113,11 @@ export function visibleRows(audit: Audit, filter: Filter): AuditRow[] {
 }
 
 export function navigationRows(audit: Audit, filter: Filter): AuditRow[] {
-  return visibleRows(audit, filter);
+  const rows = visibleRows(audit, filter);
+  return [
+    ...rows.filter((row) => row.decision === DECISIONS.KEEP_MAIN),
+    ...rows.filter((row) => row.decision !== DECISIONS.KEEP_MAIN),
+  ];
 }
 
 export function moveCursor(
@@ -257,6 +271,21 @@ function compactActivity(row: AuditRow): string {
   return `${dirty} ${open}`;
 }
 
+interface RowFormatOptions {
+  selected: Set<string>;
+  cursorPath: string | null;
+  columns: number;
+  repositoryWidth: number;
+  pathWidth: number;
+  evidenceWidth: number;
+  activityWidth: number;
+}
+
+type DashboardEntry =
+  | { kind: "section"; text: string }
+  | { kind: "spacer"; text: "" }
+  | { kind: "row"; row: AuditRow; index: number };
+
 function formatRow(
   row: AuditRow,
   index: number,
@@ -268,15 +297,7 @@ function formatRow(
     pathWidth,
     evidenceWidth,
     activityWidth,
-  }: {
-    selected: Set<string>;
-    cursorPath: string | null;
-    columns: number;
-    repositoryWidth: number;
-    pathWidth: number;
-    evidenceWidth: number;
-    activityWidth: number;
-  },
+  }: RowFormatOptions,
 ): string {
   const cursor = row.path === cursorPath ? "▶" : " ";
   const selection =
@@ -299,6 +320,94 @@ function formatRow(
   return rowText.slice(0, columns).trimEnd();
 }
 
+function terminalRows(rows: number | undefined): number | null {
+  const numericRows = rows ?? 0;
+  return Number.isFinite(numericRows) && numericRows > 0
+    ? Math.max(MIN_TERMINAL_ROWS, Math.floor(numericRows))
+    : null;
+}
+
+function buildDashboardEntries(
+  mainRows: AuditRow[],
+  linkedRows: AuditRow[],
+  rowNumbers: Map<string, number>,
+): DashboardEntry[] {
+  const entries: DashboardEntry[] = [];
+  if (mainRows.length > 0) {
+    entries.push({
+      kind: "section",
+      text: `MAIN WORKTREES (${mainRows.length})`,
+    });
+    entries.push(
+      ...mainRows.map((row) => ({
+        kind: "row" as const,
+        row,
+        index: rowNumbers.get(row.path) ?? 0,
+      })),
+    );
+    entries.push({ kind: "spacer", text: "" });
+  }
+  if (linkedRows.length > 0) {
+    const linkedSectionLabel = mainRows.length > 0 ? "LINKED" : "";
+    entries.push({
+      kind: "section",
+      text: `${linkedSectionLabel} WORKTREES (${linkedRows.length})`.trim(),
+    });
+    entries.push(
+      ...linkedRows.map((row) => ({
+        kind: "row" as const,
+        row,
+        index: rowNumbers.get(row.path) ?? 0,
+      })),
+    );
+  }
+  return entries;
+}
+
+function dashboardEntryText(
+  entry: DashboardEntry,
+  formatOptions: RowFormatOptions,
+): string {
+  if (entry.kind !== "row") return entry.text;
+  return formatRow(entry.row, entry.index, formatOptions);
+}
+
+function viewportForEntries(
+  entries: DashboardEntry[],
+  cursorPath: string | null,
+  viewportLines: number,
+): { start: number; end: number } {
+  if (entries.length <= viewportLines) return { start: 0, end: entries.length };
+  const cursorIndex = entries.findIndex(
+    (entry) => entry.kind === "row" && entry.row.path === cursorPath,
+  );
+  if (cursorIndex < 0) return { start: 0, end: viewportLines };
+  const start = Math.min(
+    Math.max(0, cursorIndex - viewportLines + 1),
+    entries.length - viewportLines,
+  );
+  return { start, end: start + viewportLines };
+}
+
+function scrollStatus(
+  rows: AuditRow[],
+  cursorPath: string | null,
+  start: number,
+  end: number,
+  totalEntries: number,
+): string {
+  const cursorIndex = rows.findIndex((row) => row.path === cursorPath);
+  const position =
+    cursorIndex < 0
+      ? `rows 0/${rows.length}`
+      : `row ${cursorIndex + 1}/${rows.length}`;
+  const hints = [
+    start > 0 ? "↑ more" : "",
+    end < totalEntries ? "↓ more" : "",
+  ].filter(Boolean);
+  return hints.length > 0 ? `${position} · ${hints.join(" · ")}` : position;
+}
+
 export function renderInteractive(
   audit: Audit,
   {
@@ -306,19 +415,22 @@ export function renderInteractive(
     filter = DEFAULT_FILTER,
     cursorPath = null,
     columns,
+    rows: terminalRowValue,
   }: {
     selected?: Set<string>;
     filter?: Filter;
     cursorPath?: string | null;
     columns?: number;
+    rows?: number;
   } = {},
 ): string {
   const width = terminalColumns(columns);
-  const rows = visibleRows(audit, filter);
+  const height = terminalRows(terminalRowValue);
+  const rows = navigationRows(audit, filter);
   const mainRows = rows.filter((row) => row.decision === DECISIONS.KEEP_MAIN);
   const linkedRows = rows.filter((row) => row.decision !== DECISIONS.KEEP_MAIN);
   const rowNumbers = new Map(
-    audit.rows.map((row, index) => [row.path, index + 1]),
+    rows.map((row, index) => [row.path, index + 1]),
   );
   const safeCount = safeRows(audit.rows).length;
   const selectedCount = selectedRows(audit, selected).length;
@@ -342,50 +454,53 @@ export function renderInteractive(
   const mainCount = audit.rows.filter(
     (row) => row.decision === DECISIONS.KEEP_MAIN,
   ).length;
+  const formatOptions: RowFormatOptions = {
+    selected,
+    cursorPath,
+    columns: width,
+    repositoryWidth,
+    pathWidth,
+    evidenceWidth,
+    activityWidth,
+  };
+  const entries = buildDashboardEntries(mainRows, linkedRows, rowNumbers);
+  const cursorRow = rows.find((row) => row.path === cursorPath);
+  const hasErrors = "errors" in audit && audit.errors.length > 0;
+  const reservedLines =
+    DASHBOARD_HEADER_LINE_COUNT +
+    DASHBOARD_SCROLL_LINE_COUNT +
+    DASHBOARD_FOOTER_LINE_COUNT +
+    (cursorRow ? DASHBOARD_FOCUS_LINE_COUNT : 0) +
+    (hasErrors ? DASHBOARD_ERROR_LINE_COUNT : 0) +
+    (height ? DASHBOARD_PROMPT_LINE_COUNT : 0);
+  const viewportLines = height
+    ? Math.max(MIN_LIST_VIEWPORT_LINES, height - reservedLines)
+    : entries.length;
+  const viewport = viewportForEntries(entries, cursorPath, viewportLines);
   const lines = [
     `Worktree Audit  ${shortenText(auditTitle(audit), width - 16)}`,
     `${audit.rows.length} worktrees · ${mainCount} main · ${safeCount} safe · ${selectedCount} selected · filter=${filter}`,
     "",
   ];
-  if (rows.length === 0) {
+  if (height) {
+    lines.push(
+      scrollStatus(
+        rows,
+        cursorPath,
+        viewport.start,
+        viewport.end,
+        entries.length,
+      ),
+    );
+  }
+  if (entries.length === 0) {
     lines.push("No rows for this filter.");
   } else {
-    const formatOptions = {
-      selected,
-      cursorPath,
-      columns: width,
-      repositoryWidth,
-      pathWidth,
-      evidenceWidth,
-      activityWidth,
-    };
-    if (mainRows.length > 0) {
-      lines.push(`MAIN WORKTREES (${mainRows.length})`);
-      for (const row of mainRows) {
-        lines.push(
-          formatRow(
-            row,
-            rowNumbers.get(row.path) ?? 0,
-            formatOptions,
-          ),
-        );
-      }
-      lines.push("");
-    }
-    if (linkedRows.length > 0) {
-      lines.push(
-        `${mainRows.length > 0 ? "LINKED" : ""} WORKTREES (${linkedRows.length})`.trim(),
-      );
-      for (const row of linkedRows) {
-        lines.push(
-          formatRow(
-            row,
-            rowNumbers.get(row.path) ?? 0,
-            formatOptions,
-          ),
-        );
-      }
-    }
+    lines.push(
+      ...entries
+        .slice(viewport.start, viewport.end)
+        .map((entry) => dashboardEntryText(entry, formatOptions)),
+    );
   }
   lines.push(
     "",
@@ -394,7 +509,6 @@ export function renderInteractive(
     "○ SAFE selectable · ◆ MAIN protected",
     "· REVIEW/UNKNOWN kept · d=dirty · o=open",
   );
-  const cursorRow = rows.find((row) => row.path === cursorPath);
   if (cursorRow) {
     lines.push(
       "",

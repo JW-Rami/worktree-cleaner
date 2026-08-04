@@ -21,6 +21,7 @@ import {
 } from "./audit.js";
 import {
   DELETE_CONFIRMATION,
+  DEFAULT_TERMINAL_ROWS,
   DEFAULT_FILTER,
   FILTERS,
   HELP,
@@ -38,7 +39,6 @@ import {
   rowIndexMap,
   safeRows,
   selectedRows,
-  visibleRows,
 } from "./interactive.js";
 import type {
   CliOutput,
@@ -339,10 +339,10 @@ function createInteractiveController({
       ) {
         selected = new Set();
       } else if (["select", "unselect"].includes(parsed.command)) {
-        const rows = visibleRows(currentAudit, filter);
+        const rows = navigationRows(currentAudit, filter);
         const selection = parseSelection(
           parsed.argument,
-          currentAudit.rows.length,
+          rows.length,
         );
         if (selection.invalid.length > 0) {
           output.write(`Invalid rows: ${selection.invalid.join(", ")}\n`);
@@ -422,6 +422,7 @@ function renderSession(
     filter: state.filter,
     cursorPath: state.cursorPath,
     columns: output.columns,
+    rows: output.rows ?? (output.isTTY ? DEFAULT_TERMINAL_ROWS : undefined),
   });
 }
 
@@ -489,6 +490,7 @@ async function runRawInteractiveSession(
   const messageOutput: CliOutput = {
     isTTY: true,
     columns: output.columns,
+    rows: output.rows,
     write(chunk) {
       lastMessage += String(chunk);
       return true;
