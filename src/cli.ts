@@ -28,6 +28,9 @@ import {
   SAFE_FILTER,
   filterMergedOnly,
   isFilter,
+  moveCursor,
+  navigationRows,
+  parseTerminalKeys,
   parseInteractiveCommand,
   parseSelection,
   printPreview,
@@ -37,7 +40,11 @@ import {
   selectedRows,
   visibleRows,
 } from "./interactive.js";
-import type { CliOutput, Filter } from "./interactive.js";
+import type {
+  CliOutput,
+  Filter,
+  TerminalKey,
+} from "./interactive.js";
 import type {
   ProgressEvent,
   RemovalTargetOptions,
@@ -184,25 +191,248 @@ export async function executeDeletion({
   return { audit: latestAudit, removed };
 }
 
-export async function runInteractiveSession({
+interface RawCliInput extends CliInput {
+  on(event: "data", listener: (chunk: Buffer | string) => void): unknown;
+  removeListener(
+    event: "data",
+    listener: (chunk: Buffer | string) => void,
+  ): unknown;
+  pause(): unknown;
+  resume(): unknown;
+  setRawMode(mode: boolean): unknown;
+}
+
+interface SessionCommandResult {
+  closed: boolean;
+  render: boolean;
+}
+
+interface InteractiveController {
+  getState(): {
+    audit: Audit;
+    filter: Filter;
+    selected: Set<string>;
+    cursorPath: string | null;
+    pendingDeletion: Set<string> | null;
+  };
+  move(direction: "up" | "down"): void;
+  toggleSelection(): void;
+  submit(value: string): Promise<SessionCommandResult>;
+}
+
+function createInteractiveController({
   audit,
   args,
-  input = process.stdin,
-  output = process.stdout,
-  errorOutput = process.stderr,
-  auditFn = auditWorktrees,
-  rootAuditFn = auditRepositories,
-  removeFn = removeWorktree,
-  verifyFn = verifyRemovalTarget,
-}: InteractiveSessionOptions): Promise<number> {
+  output,
+  errorOutput,
+  auditFn,
+  rootAuditFn,
+  removeFn,
+  verifyFn,
+}: InteractiveSessionOptions): InteractiveController {
   let currentAudit = audit;
   let filter: Filter = DEFAULT_FILTER;
   let selected = new Set<string>();
+  let cursorPath: string | null =
+    navigationRows(currentAudit, filter)[0]?.path ?? null;
   let pendingDeletion: Set<string> | null = null;
   let closed = false;
 
+  const normalizeCursor = (): void => {
+    const rows = navigationRows(currentAudit, filter);
+    if (rows.some((row) => row.path === cursorPath)) return;
+    cursorPath = rows[0]?.path ?? null;
+  };
+
+  const controller: InteractiveController = {
+    getState: () => ({
+      audit: currentAudit,
+      filter,
+      selected,
+      cursorPath,
+      pendingDeletion,
+    }),
+    move(direction) {
+      cursorPath = moveCursor(currentAudit, filter, cursorPath, direction);
+    },
+    toggleSelection() {
+      const row = navigationRows(currentAudit, filter).find(
+        (candidate) => candidate.path === cursorPath,
+      );
+      if (!row) {
+        output.write("No worktree is focused.\n");
+      } else if (row.decision !== DECISIONS.REMOVE_CANDIDATE) {
+        output.write(`Row ${row.path} is not SAFE and was kept.\n`);
+      } else if (selected.has(row.path)) {
+        selected.delete(row.path);
+      } else {
+        selected.add(row.path);
+      }
+    },
+    async submit(value) {
+      const line = String(value ?? "").trim();
+      if (pendingDeletion) {
+        if (line === DELETE_CONFIRMATION) {
+          const result = await executeDeletion({
+            audit: currentAudit,
+            paths: pendingDeletion,
+            args,
+            output,
+            errorOutput,
+            auditFn,
+            rootAuditFn,
+            removeFn,
+            verifyFn,
+          });
+          currentAudit = result.audit;
+          selected = new Set();
+          pendingDeletion = null;
+          normalizeCursor();
+          output.write(`\n${result.removed} worktree(s) deleted.\n`);
+        } else if (["/cancel", "cancel"].includes(line.toLowerCase())) {
+          pendingDeletion = null;
+          output.write("Deletion cancelled.\n");
+        } else if (
+          ["/q", "/quit", "/exit", "q", "quit", "exit"].includes(
+            line.toLowerCase(),
+          )
+        ) {
+          pendingDeletion = null;
+          closed = true;
+          return { closed: true, render: false };
+        } else {
+          pendingDeletion = null;
+          output.write("Deletion cancelled: exact confirmation required.\n");
+        }
+        return { closed, render: true };
+      }
+
+      const parsed = parseInteractiveCommand(line);
+      if (parsed.command === "noop") return { closed, render: false };
+      if (["q", "quit", "exit"].includes(parsed.command)) {
+        closed = true;
+        return { closed: true, render: false };
+      }
+      if (parsed.command === "help" || parsed.command === "?") {
+        output.write(`${HELP}\n`);
+      } else if (parsed.command === "list" || parsed.command === "show") {
+        return { closed, render: true };
+      } else if (parsed.command === "filter") {
+        const nextFilter = parsed.argument || DEFAULT_FILTER;
+        if (!isFilter(nextFilter)) {
+          output.write(
+            `Unknown filter: ${nextFilter}. Values: ${[...FILTERS].join(", ")}\n`,
+          );
+        } else {
+          filter = nextFilter;
+          normalizeCursor();
+        }
+      } else if (parsed.command === "safe") {
+        selected = new Set(
+          safeRows(currentAudit.rows).map((row) => row.path),
+        );
+        filter = SAFE_FILTER;
+        normalizeCursor();
+      } else if (
+        ["clear", "unselect"].includes(parsed.command) &&
+        !parsed.argument
+      ) {
+        selected = new Set();
+      } else if (["select", "unselect"].includes(parsed.command)) {
+        const rows = visibleRows(currentAudit, filter);
+        const selection = parseSelection(
+          parsed.argument,
+          currentAudit.rows.length,
+        );
+        if (selection.invalid.length > 0) {
+          output.write(`Invalid rows: ${selection.invalid.join(", ")}\n`);
+        }
+        for (const index of selection.indexes) {
+          const row = rowIndexMap(currentAudit.rows).get(index);
+          if (!row || !rows.includes(row)) {
+            output.write(`Row not visible: ${index}\n`);
+          } else if (row.decision !== DECISIONS.REMOVE_CANDIDATE) {
+            output.write(`Row ${index} is not SAFE and was kept.\n`);
+          } else if (parsed.command === "select") {
+            selected.add(row.path);
+          } else {
+            selected.delete(row.path);
+          }
+        }
+      } else if (parsed.command === "preview") {
+        const chosen = selectedRows(currentAudit, selected);
+        if (chosen.length === 0) output.write("No deletion selected.\n");
+        else printPreview(output, chosen);
+      } else if (parsed.command === "delete") {
+        const chosen = selectedRows(currentAudit, selected);
+        if (chosen.length === 0) {
+          output.write("No deletion selected. Use /safe or /select.\n");
+        } else {
+          printPreview(output, chosen);
+          output.write(
+            `Type ${DELETE_CONFIRMATION} to confirm, or /cancel.\n`,
+          );
+          pendingDeletion = new Set(chosen.map((row) => row.path));
+        }
+      } else if (parsed.command === "cancel") {
+        output.write("No deletion is pending.\n");
+      } else if (parsed.command === "refresh") {
+        currentAudit = await collectAudit(
+          args,
+          errorOutput,
+          auditFn,
+          rootAuditFn,
+        );
+        selected = new Set();
+        normalizeCursor();
+        output.write("Audit refreshed.\n");
+      } else if (parsed.command === "json") {
+        output.write(`${JSON.stringify(currentAudit, null, 2)}\n`);
+      } else if (parsed.command === "plain") {
+        output.write(`${renderAudit(currentAudit, { color: false })}\n`);
+      } else {
+        output.write(`Unknown command: ${parsed.command}. Type /help.\n`);
+      }
+      return { closed, render: true };
+    },
+  };
+
+  return controller;
+}
+
+function canUseRawInteractiveSession(
+  input: CliInput,
+  output: CliOutput,
+): input is RawCliInput {
+  return Boolean(
+    input.isTTY &&
+      output.isTTY &&
+      typeof (input as Partial<RawCliInput>).setRawMode === "function" &&
+      typeof (input as Partial<RawCliInput>).on === "function",
+  );
+}
+
+function renderSession(
+  controller: InteractiveController,
+  output: CliOutput,
+): string {
+  const state = controller.getState();
+  return renderInteractive(state.audit, {
+    selected: state.selected,
+    filter: state.filter,
+    cursorPath: state.cursorPath,
+    columns: output.columns,
+  });
+}
+
+async function runLineInteractiveSession(
+  options: InteractiveSessionOptions,
+): Promise<number> {
+  const { input = process.stdin, output = process.stdout } = options;
+  const controller = createInteractiveController(options);
+  let closed = false;
   const show = (): void => {
-    output.write(`${renderInteractive(currentAudit, { selected, filter })}\n`);
+    output.write(`${renderSession(controller, output)}\n`);
   };
   const finish = (): void => {
     if (closed) return;
@@ -227,125 +457,12 @@ export async function runInteractiveSession({
     readline.on("line", async (line: string) => {
       readline.pause();
       try {
-        const value = String(line ?? "").trim();
-        if (pendingDeletion) {
-          if (value === DELETE_CONFIRMATION) {
-            const result = await executeDeletion({
-              audit: currentAudit,
-              paths: pendingDeletion,
-              args,
-              output,
-              errorOutput,
-              auditFn,
-              rootAuditFn,
-              removeFn,
-              verifyFn,
-            });
-            currentAudit = result.audit;
-            selected = new Set();
-            output.write(`\n${result.removed} worktree(s) deleted.\n`);
-          } else if (["/cancel", "cancel"].includes(value.toLowerCase())) {
-            output.write("Deletion cancelled.\n");
-          } else if (
-            ["/q", "/quit", "/exit", "q", "quit", "exit"].includes(
-              value.toLowerCase(),
-            )
-          ) {
-            pendingDeletion = null;
-            readline.close();
-            return;
-          } else {
-            output.write("Deletion cancelled: exact confirmation required.\n");
-          }
-          pendingDeletion = null;
-          show();
-          return;
-        }
-
-        const parsed = parseInteractiveCommand(value);
-        if (parsed.command === "noop") return;
-        if (["q", "quit", "exit"].includes(parsed.command)) {
+        const result = await controller.submit(line);
+        if (result.closed) {
           readline.close();
           return;
         }
-        if (parsed.command === "help" || parsed.command === "?") {
-          output.write(`${HELP}\n`);
-        } else if (parsed.command === "list" || parsed.command === "show") {
-          show();
-        } else if (parsed.command === "filter") {
-          const nextFilter = parsed.argument || DEFAULT_FILTER;
-          if (!isFilter(nextFilter)) {
-            output.write(
-              `Unknown filter: ${nextFilter}. Values: ${[...FILTERS].join(", ")}\n`,
-            );
-          } else {
-            filter = nextFilter;
-          }
-        } else if (parsed.command === "safe") {
-          selected = new Set(
-            safeRows(currentAudit.rows).map((row) => row.path),
-          );
-          filter = SAFE_FILTER;
-        } else if (
-          ["clear", "unselect"].includes(parsed.command) &&
-          !parsed.argument
-        ) {
-          selected = new Set();
-        } else if (["select", "unselect"].includes(parsed.command)) {
-          const rows = visibleRows(currentAudit, filter);
-          const selection = parseSelection(
-            parsed.argument,
-            currentAudit.rows.length,
-          );
-          if (selection.invalid.length > 0) {
-            output.write(`Invalid rows: ${selection.invalid.join(", ")}\n`);
-          }
-          for (const index of selection.indexes) {
-            const row = rowIndexMap(currentAudit.rows).get(index);
-            if (!row || !rows.includes(row)) {
-              output.write(`Row not visible: ${index}\n`);
-            } else if (row.decision !== DECISIONS.REMOVE_CANDIDATE) {
-              output.write(`Row ${index} is not SAFE and was kept.\n`);
-            } else if (parsed.command === "select") {
-              selected.add(row.path);
-            } else {
-              selected.delete(row.path);
-            }
-          }
-        } else if (parsed.command === "preview") {
-          const chosen = selectedRows(currentAudit, selected);
-          if (chosen.length === 0) output.write("No deletion selected.\n");
-          else printPreview(output, chosen);
-        } else if (parsed.command === "delete") {
-          const chosen = selectedRows(currentAudit, selected);
-          if (chosen.length === 0) {
-            output.write("No deletion selected. Use /safe or /select.\n");
-          } else {
-            printPreview(output, chosen);
-            output.write(
-              `Type ${DELETE_CONFIRMATION} to confirm, or /cancel.\n`,
-            );
-            pendingDeletion = new Set(chosen.map((row) => row.path));
-          }
-        } else if (parsed.command === "cancel") {
-          output.write("No deletion is pending.\n");
-        } else if (parsed.command === "refresh") {
-          currentAudit = await collectAudit(
-            args,
-            errorOutput,
-            auditFn,
-            rootAuditFn,
-          );
-          selected = new Set();
-          output.write("Audit refreshed.\n");
-        } else if (parsed.command === "json") {
-          output.write(`${JSON.stringify(currentAudit, null, 2)}\n`);
-        } else if (parsed.command === "plain") {
-          output.write(`${renderAudit(currentAudit, { color: false })}\n`);
-        } else {
-          output.write(`Unknown command: ${parsed.command}. Type /help.\n`);
-        }
-        if (!closed && !["list", "show"].includes(parsed.command)) show();
+        if (result.render) show();
       } catch (error) {
         output.write(
           `Error: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -358,6 +475,136 @@ export async function runInteractiveSession({
       }
     });
   });
+}
+
+const ANSI_CLEAR_SCREEN = "\u001b[2J\u001b[H";
+const ANSI_HIDE_CURSOR = "\u001b[?25l";
+const ANSI_SHOW_CURSOR = "\u001b[?25h";
+
+async function runRawInteractiveSession(
+  options: InteractiveSessionOptions & { input: RawCliInput },
+): Promise<number> {
+  const { input, output = process.stdout } = options;
+  let lastMessage = "";
+  const messageOutput: CliOutput = {
+    isTTY: true,
+    columns: output.columns,
+    write(chunk) {
+      lastMessage += String(chunk);
+      return true;
+    },
+  };
+  const controller = createInteractiveController({
+    ...options,
+    output: messageOutput,
+    errorOutput: messageOutput,
+  });
+  let pendingEscape = "";
+  let commandBuffer = "";
+  let closed = false;
+  let keyQueue = Promise.resolve();
+  let resolveSession: ((code: number) => void) | null = null;
+
+  const render = (): void => {
+    const state = controller.getState();
+    const prompt = state.pendingDeletion ? "confirm> " : PROMPT;
+    output.write(
+      `${ANSI_CLEAR_SCREEN}${ANSI_HIDE_CURSOR}${lastMessage}${renderSession(controller, output)}\n\n${prompt}${commandBuffer}`,
+    );
+  };
+  const finish = (): void => {
+    if (closed) return;
+    closed = true;
+    input.removeListener("data", onData);
+    input.setRawMode(false);
+    input.pause();
+    output.write(`${ANSI_SHOW_CURSOR}\nSession ended.\n`);
+    resolveSession?.(0);
+    resolveSession = null;
+  };
+  const submit = async (): Promise<void> => {
+    const value = commandBuffer.trim();
+    if (!value) {
+      render();
+      return;
+    }
+    lastMessage = "";
+    commandBuffer = "";
+    const result = await controller.submit(value);
+    if (result.closed) {
+      finish();
+      return;
+    }
+    render();
+  };
+  const handleKey = async (key: TerminalKey): Promise<void> => {
+    if (closed) return;
+    if (key.kind === "interrupt") {
+      finish();
+    } else if (key.kind === "up" || key.kind === "down") {
+      commandBuffer = "";
+      controller.move(key.kind);
+      render();
+    } else if (key.kind === "space" && commandBuffer.length === 0) {
+      lastMessage = "";
+      controller.toggleSelection();
+      render();
+    } else if (key.kind === "space") {
+      commandBuffer += " ";
+      render();
+    } else if (key.kind === "backspace") {
+      commandBuffer = Array.from(commandBuffer).slice(0, -1).join("");
+      render();
+    } else if (key.kind === "escape") {
+      commandBuffer = "";
+      render();
+    } else if (key.kind === "enter") {
+      await submit();
+    } else if (key.kind === "character") {
+      if (commandBuffer.length === 0 && key.value.toLowerCase() === "q") {
+        await controller.submit("/quit");
+        finish();
+      } else if (commandBuffer.length === 0 && key.value === "?") {
+        lastMessage = "";
+        await controller.submit("/help");
+        render();
+      } else {
+        commandBuffer += key.value;
+        render();
+      }
+    }
+  };
+  const onData = (chunk: Buffer | string): void => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    const parsed = parseTerminalKeys(text, pendingEscape);
+    pendingEscape = parsed.pendingEscape;
+    for (const key of parsed.keys) {
+      keyQueue = keyQueue.then(() => handleKey(key));
+    }
+    keyQueue = keyQueue.catch((error: unknown) => {
+      lastMessage = `Error: ${error instanceof Error ? error.message : String(error)}\n`;
+      render();
+    });
+  };
+
+  input.setRawMode(true);
+  input.on("data", onData);
+  input.resume();
+  render();
+  return new Promise<number>((resolve) => {
+    resolveSession = resolve;
+    if (closed) resolve(0);
+  });
+}
+
+export async function runInteractiveSession(
+  options: InteractiveSessionOptions,
+): Promise<number> {
+  const { input = process.stdin, output = process.stdout } = options;
+  if (canUseRawInteractiveSession(input, output)) {
+    return runRawInteractiveSession({ ...options, input });
+  }
+  return runLineInteractiveSession(options);
 }
 
 export async function runCli({

@@ -36,8 +36,17 @@ is used:
 npm start -- --all --root ~/Projects
 ```
 
-The default TTY experience is interactive. It then opens an `audit>` prompt
-with slash commands:
+The default TTY experience is an interactive dashboard. It separates primary
+worktrees from linked worktrees, shortens long paths to the terminal width, and
+uses a cursor instead of requiring row numbers:
+
+```text
+↑/↓ move · space select · enter command · /help · q quit
+```
+
+`◆ MAIN` rows are the primary worktrees and can never be selected. `○ SAFE`
+rows are deletion candidates. Review and unknown rows stay visible but are
+never selectable. Press `Enter` to type a slash command:
 
 ```text
 /help
@@ -93,6 +102,9 @@ partial discovery without treating it as a complete scan. A non-TTY without
 | `/refresh`     | Re-scan the repository             |
 | `/json`        | Print the structured audit         |
 | `/quit`        | Exit without deleting              |
+
+Arrow-key selection is equivalent to `/select`: focus a row with `↑` or `↓`,
+press `Space` to toggle a SAFE row, then use `/preview` and `/delete`.
 
 ## Development
 

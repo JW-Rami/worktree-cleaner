@@ -2,6 +2,7 @@ import { DECISIONS, type Audit, type AuditRow } from "./domain.js";
 
 export interface CliOutput {
   isTTY?: boolean;
+  columns?: number;
   write(chunk: string): unknown;
 }
 
@@ -23,6 +24,44 @@ export const FILTERS: ReadonlySet<Filter> = new Set([
   "unknown",
 ]);
 
+export type CursorDirection = "up" | "down";
+
+export type TerminalKey =
+  | { kind: "up" }
+  | { kind: "down" }
+  | { kind: "left" }
+  | { kind: "right" }
+  | { kind: "enter" }
+  | { kind: "space" }
+  | { kind: "backspace" }
+  | { kind: "escape" }
+  | { kind: "interrupt" }
+  | { kind: "character"; value: string };
+
+const ANSI_ESCAPE = "\u001b";
+const TERMINAL_KEY_SEQUENCES: ReadonlyArray<readonly [string, TerminalKey]> = [
+  [`${ANSI_ESCAPE}[A`, { kind: "up" }],
+  [`${ANSI_ESCAPE}OA`, { kind: "up" }],
+  [`${ANSI_ESCAPE}[1;5A`, { kind: "up" }],
+  [`${ANSI_ESCAPE}[B`, { kind: "down" }],
+  [`${ANSI_ESCAPE}OB`, { kind: "down" }],
+  [`${ANSI_ESCAPE}[1;5B`, { kind: "down" }],
+  [`${ANSI_ESCAPE}[D`, { kind: "left" }],
+  [`${ANSI_ESCAPE}OD`, { kind: "left" }],
+  [`${ANSI_ESCAPE}[C`, { kind: "right" }],
+  [`${ANSI_ESCAPE}OC`, { kind: "right" }],
+];
+
+const DEFAULT_TERMINAL_COLUMNS = 100;
+const MIN_TERMINAL_COLUMNS = 80;
+const INDEX_COLUMN_WIDTH = 3;
+const STATUS_COLUMN_WIDTH = 7;
+const SIZE_COLUMN_WIDTH = 6;
+const MIN_REPOSITORY_COLUMN_WIDTH = 12;
+const MIN_EVIDENCE_COLUMN_WIDTH = 14;
+const MIN_ACTIVITY_COLUMN_WIDTH = 10;
+const MIN_PATH_COLUMN_WIDTH = 18;
+
 export const HELP = `
 Commands:
   /help                  Show this help
@@ -38,6 +77,12 @@ Commands:
   /plain                 Print the non-interactive report
   /cancel                Cancel the pending confirmation
   /quit                  Exit
+
+Keyboard:
+  ↑/↓                    Move the focused row
+  Space                  Toggle the focused SAFE row
+  Enter                  Edit and run a command
+  q                      Exit
 
 SAFE rows are the only selectable rows. Deletion requires the exact DELETE
 confirmation and a second Git/process validation.
@@ -57,6 +102,26 @@ export function visibleRows(audit: Audit, filter: Filter): AuditRow[] {
   return audit.rows.filter((row) => rowMatchesFilter(row, filter));
 }
 
+export function navigationRows(audit: Audit, filter: Filter): AuditRow[] {
+  return visibleRows(audit, filter);
+}
+
+export function moveCursor(
+  audit: Audit,
+  filter: Filter,
+  cursorPath: string | null,
+  direction: CursorDirection,
+): string | null {
+  const rows = navigationRows(audit, filter);
+  if (rows.length === 0) return null;
+  const currentIndex = rows.findIndex((row) => row.path === cursorPath);
+  if (currentIndex === -1) {
+    return direction === "up" ? rows.at(-1)!.path : rows[0].path;
+  }
+  const offset = direction === "up" ? -1 : 1;
+  return rows[(currentIndex + offset + rows.length) % rows.length].path;
+}
+
 export function rowIndexMap(rows: AuditRow[]): Map<number, AuditRow> {
   return new Map(rows.map((row, index) => [index + 1, row]));
 }
@@ -74,17 +139,164 @@ function auditTitle(audit: Audit): string {
   return audit.repository ?? "local Git repository";
 }
 
-function formatRow(row: AuditRow, index: number, selected: Set<string>): string {
-  const selectedMarker = selected.has(row.path) ? "*" : " ";
-  const repositoryLabel = row.repository ?? row.repoRoot;
-  const scope = repositoryLabel ? `[${repositoryLabel}] ` : "";
-  const pullRequest = row.pr.pullRequest
-    ? `PR #${row.pr.pullRequest.number} ${row.pr.pullRequest.state}`
-    : row.pr.kind;
-  const chat = row.chat.threads[0]
-    ? `${row.chat.threads[0].title} [${row.chat.threads[0].status}]`
-    : `chat ${row.chat.kind}`;
-  return `${selectedMarker} ${String(index).padStart(2)} ${row.marker} ${row.size.padStart(9)} ${scope}${row.path} · ${pullRequest} · 💬 ${chat} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}`;
+export function parseTerminalKeys(
+  chunk: string,
+  pendingEscape = "",
+): { keys: TerminalKey[]; pendingEscape: string } {
+  let input = `${pendingEscape}${chunk}`;
+  const keys: TerminalKey[] = [];
+
+  while (input.length > 0) {
+    const sequence = TERMINAL_KEY_SEQUENCES.find(([value]) =>
+      input.startsWith(value),
+    );
+    if (sequence) {
+      keys.push(sequence[1]);
+      input = input.slice(sequence[0].length);
+      continue;
+    }
+
+    if (input.startsWith(ANSI_ESCAPE)) {
+      const isPartialSequence = TERMINAL_KEY_SEQUENCES.some(([value]) =>
+        value.startsWith(input),
+      );
+      if (isPartialSequence) break;
+      keys.push({ kind: "escape" });
+      input = input.slice(ANSI_ESCAPE.length);
+      continue;
+    }
+
+    const character = input[0];
+    input = input.slice(1);
+    if (character === "\r" || character === "\n") {
+      keys.push({ kind: "enter" });
+    } else if (character === "\u007f" || character === "\b") {
+      keys.push({ kind: "backspace" });
+    } else if (character === " ") {
+      keys.push({ kind: "space" });
+    } else if (character === "\u0003" || character === "\u0004") {
+      keys.push({ kind: "interrupt" });
+    } else {
+      keys.push({ kind: "character", value: character });
+    }
+  }
+
+  return { keys, pendingEscape: input };
+}
+
+function terminalColumns(columns: number | undefined): number {
+  const numericColumns = columns ?? 0;
+  return Number.isFinite(numericColumns) && numericColumns > 0
+    ? Math.max(MIN_TERMINAL_COLUMNS, Math.floor(numericColumns))
+    : DEFAULT_TERMINAL_COLUMNS;
+}
+
+function shortenText(value: unknown, maxLength: number): string {
+  const text = String(value ?? "");
+  if (text.length <= maxLength) return text;
+  const prefixLength = Math.ceil((maxLength - 1) / 2);
+  const suffixLength = maxLength - 1 - prefixLength;
+  return `${text.slice(0, prefixLength)}…${text.slice(-suffixLength)}`;
+}
+
+function shortenPath(path: string, maxLength: number): string {
+  if (path.length <= maxLength) return path;
+  const segments = path.split("/").filter(Boolean);
+  const tail = segments.slice(-2).join("/");
+  const prefix = path.startsWith("/") ? "/" : "";
+  return shortenText(`${prefix}…/${tail}`, maxLength);
+}
+
+function statusLabel(row: AuditRow): string {
+  if (row.decision === DECISIONS.REMOVE_CANDIDATE) return "SAFE";
+  if (row.decision === DECISIONS.KEEP_MAIN) return "MAIN";
+  if (row.decision === DECISIONS.KEEP_DIRTY) return "DIRTY";
+  if (row.decision === DECISIONS.KEEP_ACTIVE_CHAT) return "ACTIVE";
+  if (row.decision === DECISIONS.REVIEW) return "REVIEW";
+  return "UNKNOWN";
+}
+
+function compactSize(size: string): string {
+  return size.replace(/\s*GiB$/u, "G");
+}
+
+function compactPullRequest(row: AuditRow): string {
+  if (row.pr.pullRequest) {
+    return `#${row.pr.pullRequest.number} ${row.pr.pullRequest.state.toLowerCase()}`;
+  }
+  const labels: Record<string, string> = {
+    NO_BRANCH: "no branch",
+    NO_PR: "no PR",
+    UNKNOWN_GITHUB: "PR ?",
+    AMBIGUOUS: "PR ambiguous",
+    MERGED_STALE: "stale PR",
+    BRANCH_STALE: "stale branch",
+  };
+  return labels[row.pr.kind] ?? row.pr.kind.toLowerCase();
+}
+
+function compactChat(row: AuditRow): string {
+  const thread = row.chat.threads[0];
+  if (thread) {
+    return thread.status.toLowerCase() === "active" ? "chat*" : "chat";
+  }
+  if (row.chat.kind === "NO_CHAT") return "nochat";
+  return "chat?";
+}
+
+function compactEvidence(row: AuditRow): string {
+  const pullRequest = compactPullRequest(row);
+  return row.chat.kind === "EXACT" && row.chat.threads.length === 0
+    ? pullRequest
+    : `${pullRequest}·${compactChat(row)}`;
+}
+
+function compactActivity(row: AuditRow): string {
+  const dirty = `d=${row.dirtyCount ?? "?"}`;
+  const open = `o=${row.openProcessCount ?? "?"}`;
+  return `${dirty} ${open}`;
+}
+
+function formatRow(
+  row: AuditRow,
+  index: number,
+  {
+    selected,
+    cursorPath,
+    columns,
+    repositoryWidth,
+    pathWidth,
+    evidenceWidth,
+    activityWidth,
+  }: {
+    selected: Set<string>;
+    cursorPath: string | null;
+    columns: number;
+    repositoryWidth: number;
+    pathWidth: number;
+    evidenceWidth: number;
+    activityWidth: number;
+  },
+): string {
+  const cursor = row.path === cursorPath ? "▶" : " ";
+  const selection =
+    row.decision === DECISIONS.KEEP_MAIN
+      ? "◆"
+      : row.decision === DECISIONS.REMOVE_CANDIDATE
+        ? selected.has(row.path)
+          ? "●"
+          : "○"
+        : "·";
+  const repositoryLabel = row.repository ?? row.repoRoot ?? "local";
+  const repository = shortenText(repositoryLabel, repositoryWidth);
+  const path = shortenPath(row.path, pathWidth);
+  const evidence = shortenText(compactEvidence(row), evidenceWidth);
+  const activity = shortenText(compactActivity(row), activityWidth);
+  const indexLabel = String(index).padStart(INDEX_COLUMN_WIDTH);
+  const size = compactSize(row.size).padStart(SIZE_COLUMN_WIDTH);
+  const status = statusLabel(row).padEnd(STATUS_COLUMN_WIDTH);
+  const rowText = `${cursor} ${selection} ${indexLabel} ${status} ${size} ${repository.padEnd(repositoryWidth)} ${path.padEnd(pathWidth)} ${evidence.padEnd(evidenceWidth)} ${activity}`;
+  return rowText.slice(0, columns).trimEnd();
 }
 
 export function renderInteractive(
@@ -92,42 +304,115 @@ export function renderInteractive(
   {
     selected = new Set<string>(),
     filter = DEFAULT_FILTER,
-  }: { selected?: Set<string>; filter?: Filter } = {},
+    cursorPath = null,
+    columns,
+  }: {
+    selected?: Set<string>;
+    filter?: Filter;
+    cursorPath?: string | null;
+    columns?: number;
+  } = {},
 ): string {
+  const width = terminalColumns(columns);
   const rows = visibleRows(audit, filter);
+  const mainRows = rows.filter((row) => row.decision === DECISIONS.KEEP_MAIN);
+  const linkedRows = rows.filter((row) => row.decision !== DECISIONS.KEEP_MAIN);
+  const rowNumbers = new Map(
+    audit.rows.map((row, index) => [row.path, index + 1]),
+  );
   const safeCount = safeRows(audit.rows).length;
-  const selectedCount = audit.rows.filter((row) =>
-    selected.has(row.path),
+  const selectedCount = selectedRows(audit, selected).length;
+  const variableColumns = width - 23;
+  const repositoryWidth = Math.max(
+    MIN_REPOSITORY_COLUMN_WIDTH,
+    Math.min(24, Math.floor(variableColumns * 0.22)),
+  );
+  const evidenceWidth = Math.max(
+    MIN_EVIDENCE_COLUMN_WIDTH,
+    Math.min(22, Math.floor(variableColumns * 0.2)),
+  );
+  const activityWidth = Math.max(
+    MIN_ACTIVITY_COLUMN_WIDTH,
+    Math.min(18, Math.floor(variableColumns * 0.16)),
+  );
+  const pathWidth = Math.max(
+    MIN_PATH_COLUMN_WIDTH,
+    variableColumns - repositoryWidth - evidenceWidth - activityWidth - 3,
+  );
+  const mainCount = audit.rows.filter(
+    (row) => row.decision === DECISIONS.KEEP_MAIN,
   ).length;
   const lines = [
-    `\n🧹 Worktree Audit · ${auditTitle(audit)}`,
-    `${audit.rows.length} worktrees · ${safeCount} SAFE · ${selectedCount} selected · filter=${filter}`,
-    "Commands: /help /safe /preview /delete /refresh /quit. SAFE rows can be deleted after double validation.",
+    `Worktree Audit  ${shortenText(auditTitle(audit), width - 16)}`,
+    `${audit.rows.length} worktrees · ${mainCount} main · ${safeCount} safe · ${selectedCount} selected · filter=${filter}`,
     "",
   ];
   if (rows.length === 0) {
     lines.push("No rows for this filter.");
   } else {
-    rows.forEach((row) =>
+    const formatOptions = {
+      selected,
+      cursorPath,
+      columns: width,
+      repositoryWidth,
+      pathWidth,
+      evidenceWidth,
+      activityWidth,
+    };
+    if (mainRows.length > 0) {
+      lines.push(`MAIN WORKTREES (${mainRows.length})`);
+      for (const row of mainRows) {
+        lines.push(
+          formatRow(
+            row,
+            rowNumbers.get(row.path) ?? 0,
+            formatOptions,
+          ),
+        );
+      }
+      lines.push("");
+    }
+    if (linkedRows.length > 0) {
       lines.push(
-        formatRow(
-          row,
-          audit.rows.findIndex((candidate) => candidate.path === row.path) + 1,
-          selected,
-        ),
-      ),
-    );
+        `${mainRows.length > 0 ? "LINKED" : ""} WORKTREES (${linkedRows.length})`.trim(),
+      );
+      for (const row of linkedRows) {
+        lines.push(
+          formatRow(
+            row,
+            rowNumbers.get(row.path) ?? 0,
+            formatOptions,
+          ),
+        );
+      }
+    }
   }
   lines.push(
     "",
-    "* selected · SAFE selectable · REVIEW/UNKNOWN kept by default",
+    "↑/↓ move · space select · enter command · /help · q quit",
+    "Commands: /safe /preview /delete /refresh /quit",
+    "○ SAFE selectable · ◆ MAIN protected",
+    "· REVIEW/UNKNOWN kept · d=dirty · o=open",
   );
+  const cursorRow = rows.find((row) => row.path === cursorPath);
+  if (cursorRow) {
+    lines.push(
+      "",
+      shortenText(
+        `Focus: ${shortenPath(cursorRow.path, width - 7)} · branch=${shortenText(cursorRow.branch ?? "detached", 24)}`,
+        width,
+      ),
+    );
+  }
   if ("errors" in audit && audit.errors.length > 0) {
     lines.push(
       "",
-      `⚠️ ${audit.errors.length} error(s): ${audit.errors
-        .map((error) => error.path)
-        .join(", ")}`,
+      shortenText(
+        `⚠️ ${audit.errors.length} error(s): ${audit.errors
+          .map((error) => shortenPath(error.path, 28))
+          .join(", ")}`,
+        width,
+      ),
     );
   }
   return lines.join("\n");
@@ -177,7 +462,10 @@ export function parseInteractiveCommand(line: unknown): InteractiveCommand {
 }
 
 export function selectedRows(audit: Audit, selected: Set<string>): AuditRow[] {
-  return audit.rows.filter((row) => selected.has(row.path));
+  return audit.rows.filter(
+    (row) =>
+      row.decision === DECISIONS.REMOVE_CANDIDATE && selected.has(row.path),
+  );
 }
 
 export function filterMergedOnly(audit: Audit): Audit {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import {
   mkdtempSync,
   mkdirSync,
@@ -39,11 +40,16 @@ import {
 } from "../src/audit.js";
 import {
   executeDeletion,
+  runInteractiveSession,
   parseInteractiveCommand,
   parseSelection,
   renderInteractive,
   runCli,
 } from "../src/cli.js";
+import {
+  moveCursor,
+  parseTerminalKeys,
+} from "../src/interactive.js";
 
 const mergedHead = "a".repeat(40);
 const staleHead = "b".repeat(40);
@@ -571,6 +577,34 @@ detached
     });
   });
 
+  it("decodes split arrow sequences and wraps the dashboard cursor", () => {
+    const partial = parseTerminalKeys("\u001b[");
+    assert.deepEqual(partial.keys, []);
+    assert.equal(partial.pendingEscape, "\u001b[");
+    assert.deepEqual(parseTerminalKeys("A", partial.pendingEscape).keys, [
+      { kind: "up" },
+    ]);
+
+    const first = buildAuditRow({
+      state: state({ path: "/tmp/first" }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const second = buildAuditRow({
+      state: state({ path: "/tmp/second" }),
+      pr: {
+        kind: "MERGED_EXACT",
+        pullRequest: pullRequest({ number: 43 }),
+      },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const audit = { repoRoot: "/repo", repository: null, rows: [first, second] };
+    assert.equal(moveCursor(audit, "all", first.path, "down"), second.path);
+    assert.equal(moveCursor(audit, "all", first.path, "up"), second.path);
+  });
+
   it("renders an actionable interactive dashboard", () => {
     const row = buildAuditRow({
       state: state(),
@@ -591,9 +625,104 @@ detached
     );
 
     assert.match(output, /Worktree Audit/u);
-    assert.match(output, /Commands:/u);
+    assert.match(output, /↑\/↓ move/u);
     assert.match(output, /\/delete/u);
-    assert.match(output, /\*  1/u);
+    assert.match(output, /●\s+1\s+SAFE/u);
+  });
+
+  it("separates primary worktrees and shortens rows to the terminal width", () => {
+    const main = buildAuditRow({
+      state: state({ path: "/Users/rami/Dev/very-long-primary-repository-name" }),
+      pr: { kind: "NO_PR", pullRequest: null },
+      chat: { kind: "NO_CHAT", threads: [] },
+      mainPath: "/Users/rami/Dev/very-long-primary-repository-name",
+    });
+    const linked = buildAuditRow({
+      state: state({
+        path: "/Users/rami/Dev/very-long-primary-repository-name-linked-worktree",
+      }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: main.path,
+    });
+    const output = renderInteractive(
+      {
+        repoRoot: main.path,
+        repository: "The-JW-Corp/very-long-primary-repository-name",
+        rows: [main, linked],
+      },
+      {
+        columns: 80,
+        cursorPath: linked.path,
+        selected: new Set([main.path, linked.path]),
+      },
+    );
+
+    assert.match(output, /1 selected/u);
+    assert.match(output, /MAIN WORKTREES \(1\)/u);
+    assert.match(output, /LINKED WORKTREES \(1\)/u);
+    assert.match(output, /◆\s+1\s+MAIN/u);
+    assert.match(output, /●\s+2\s+SAFE/u);
+    assert.match(output, /…/u);
+    for (const line of output.split("\n")) {
+      assert.ok(line.length <= 80, line);
+    }
+  });
+
+  it("moves the cursor and selects a safe row with terminal keys", async () => {
+    const first = buildAuditRow({
+      state: state({ path: "/tmp/first" }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const second = buildAuditRow({
+      state: state({ path: "/tmp/second" }),
+      pr: {
+        kind: "MERGED_EXACT",
+        pullRequest: pullRequest({ number: 43 }),
+      },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const rawModes: boolean[] = [];
+    const input = Object.assign(new EventEmitter(), {
+      isTTY: true,
+      setRawMode(mode: boolean) {
+        rawModes.push(mode);
+        return input;
+      },
+      pause() {
+        return input;
+      },
+      resume() {
+        return input;
+      },
+    });
+    const chunks: string[] = [];
+    const output = {
+      isTTY: true,
+      columns: 80,
+      write(chunk: string) {
+        chunks.push(chunk);
+        return true;
+      },
+    };
+    const session = runInteractiveSession({
+      audit: { repoRoot: "/repo", repository: null, rows: [first, second] },
+      args: { cwd: "/repo", cwdExplicit: true, noGithub: true, noChat: true },
+      input,
+      output,
+      errorOutput: output,
+    });
+
+    input.emit("data", "\u001b[B");
+    input.emit("data", " ");
+    input.emit("data", "q");
+
+    assert.equal(await session, 0);
+    assert.deepEqual(rawModes, [true, false]);
+    assert.match(chunks.join(""), /●\s+2\s+SAFE/u);
   });
 
   it("re-audits and removes only a still-safe exact worktree", async () => {
