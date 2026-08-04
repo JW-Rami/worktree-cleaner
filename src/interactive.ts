@@ -4,6 +4,7 @@ export interface CliOutput {
   isTTY?: boolean;
   columns?: number;
   rows?: number;
+  color?: boolean;
   write(chunk: string): unknown;
 }
 
@@ -63,6 +64,7 @@ const MIN_REPOSITORY_COLUMN_WIDTH = 12;
 const MIN_EVIDENCE_COLUMN_WIDTH = 14;
 const MIN_ACTIVITY_COLUMN_WIDTH = 10;
 const MIN_PATH_COLUMN_WIDTH = 18;
+const ROW_FIXED_COLUMN_COUNT = 24;
 const MIN_TERMINAL_ROWS = 8;
 const DASHBOARD_HEADER_LINE_COUNT = 3;
 const DASHBOARD_SCROLL_LINE_COUNT = 1;
@@ -71,6 +73,9 @@ const DASHBOARD_FOCUS_LINE_COUNT = 2;
 const DASHBOARD_ERROR_LINE_COUNT = 2;
 const DASHBOARD_PROMPT_LINE_COUNT = 2;
 const MIN_LIST_VIEWPORT_LINES = 1;
+const ANSI_GREEN = "\u001b[32m";
+const ANSI_BOLD = "\u001b[1m";
+const ANSI_RESET = "\u001b[0m";
 
 export const HELP = `
 Commands:
@@ -94,6 +99,7 @@ Keyboard:
   Enter                  Edit and run a command
   q                      Exit
 
+✅ marks selected rows; selected rows are green in a color-capable TTY.
 SAFE rows are the only selectable rows. Deletion requires the exact DELETE
 confirmation and a second Git/process validation.
 `;
@@ -279,6 +285,7 @@ interface RowFormatOptions {
   pathWidth: number;
   evidenceWidth: number;
   activityWidth: number;
+  color: boolean;
 }
 
 type DashboardEntry =
@@ -297,6 +304,7 @@ function formatRow(
     pathWidth,
     evidenceWidth,
     activityWidth,
+    color,
   }: RowFormatOptions,
 ): string {
   const cursor = row.path === cursorPath ? "▶" : " ";
@@ -305,9 +313,11 @@ function formatRow(
       ? "◆"
       : row.decision === DECISIONS.REMOVE_CANDIDATE
         ? selected.has(row.path)
-          ? "●"
+          ? "✅"
           : "○"
         : "·";
+  const isSelected =
+    row.decision === DECISIONS.REMOVE_CANDIDATE && selected.has(row.path);
   const repositoryLabel = row.repository ?? row.repoRoot ?? "local";
   const repository = shortenText(repositoryLabel, repositoryWidth);
   const path = shortenPath(row.path, pathWidth);
@@ -317,7 +327,10 @@ function formatRow(
   const size = compactSize(row.size).padStart(SIZE_COLUMN_WIDTH);
   const status = statusLabel(row).padEnd(STATUS_COLUMN_WIDTH);
   const rowText = `${cursor} ${selection} ${indexLabel} ${status} ${size} ${repository.padEnd(repositoryWidth)} ${path.padEnd(pathWidth)} ${evidence.padEnd(evidenceWidth)} ${activity}`;
-  return rowText.slice(0, columns).trimEnd();
+  const visibleRow = rowText.slice(0, columns).trimEnd();
+  return isSelected && color
+    ? `${ANSI_GREEN}${ANSI_BOLD}${visibleRow}${ANSI_RESET}`
+    : visibleRow;
 }
 
 function terminalRows(rows: number | undefined): number | null {
@@ -416,12 +429,14 @@ export function renderInteractive(
     cursorPath = null,
     columns,
     rows: terminalRowValue,
+    color = false,
   }: {
     selected?: Set<string>;
     filter?: Filter;
     cursorPath?: string | null;
     columns?: number;
     rows?: number;
+    color?: boolean;
   } = {},
 ): string {
   const width = terminalColumns(columns);
@@ -434,7 +449,7 @@ export function renderInteractive(
   );
   const safeCount = safeRows(audit.rows).length;
   const selectedCount = selectedRows(audit, selected).length;
-  const variableColumns = width - 23;
+  const variableColumns = width - ROW_FIXED_COLUMN_COUNT;
   const repositoryWidth = Math.max(
     MIN_REPOSITORY_COLUMN_WIDTH,
     Math.min(24, Math.floor(variableColumns * 0.22)),
@@ -462,6 +477,7 @@ export function renderInteractive(
     pathWidth,
     evidenceWidth,
     activityWidth,
+    color,
   };
   const entries = buildDashboardEntries(mainRows, linkedRows, rowNumbers);
   const cursorRow = rows.find((row) => row.path === cursorPath);
@@ -506,7 +522,7 @@ export function renderInteractive(
     "",
     "↑/↓ move · space select · enter command · /help · q quit",
     "Commands: /safe /preview /delete /refresh /quit",
-    "○ SAFE selectable · ◆ MAIN protected",
+    "✅ SELECTED · ○ SAFE selectable · ◆ MAIN protected",
     "· REVIEW/UNKNOWN kept · d=dirty · o=open",
   );
   if (cursorRow) {

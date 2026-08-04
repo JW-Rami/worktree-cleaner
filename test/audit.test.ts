@@ -627,7 +627,8 @@ detached
     assert.match(output, /Worktree Audit/u);
     assert.match(output, /↑\/↓ move/u);
     assert.match(output, /\/delete/u);
-    assert.match(output, /●\s+1\s+SAFE/u);
+    assert.match(output, /✅\s+1\s+SAFE/u);
+    assert.match(output, /✅ SELECTED/u);
   });
 
   it("separates primary worktrees and shortens rows to the terminal width", () => {
@@ -662,7 +663,7 @@ detached
     assert.match(output, /MAIN WORKTREES \(1\)/u);
     assert.match(output, /LINKED WORKTREES \(1\)/u);
     assert.match(output, /◆\s+1\s+MAIN/u);
-    assert.match(output, /●\s+2\s+SAFE/u);
+    assert.match(output, /✅\s+2\s+SAFE/u);
     assert.match(output, /…/u);
     for (const line of output.split("\n")) {
       assert.ok(line.length <= 80, line);
@@ -690,6 +691,23 @@ detached
     assert.match(output, /▶\s+○\s+  9\s+SAFE/u);
     assert.doesNotMatch(output, /worktree-1/u);
     assert.equal(output.match(/▶/gu)?.length, 1);
+  });
+
+  it("adds terminal color to the selected row without hiding its marker", () => {
+    const row = buildAuditRow({
+      state: state(),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const output = renderInteractive(
+      { repoRoot: "/repo", repository: null, rows: [row] },
+      { selected: new Set([row.path]), columns: 80, color: true },
+    );
+
+    assert.match(output, /✅\s+1\s+SAFE/u);
+    assert.match(output, /\u001b\[32m\u001b\[1m/u);
+    assert.match(output, /\u001b\[0m/u);
   });
 
   it("moves the cursor and selects a safe row with terminal keys", async () => {
@@ -742,6 +760,7 @@ detached
       isTTY: true,
       columns: 80,
       rows: 16,
+      color: true,
       write(chunk: string) {
         chunks.push(chunk);
         return true;
@@ -764,7 +783,8 @@ detached
     assert.equal(await session, 0);
     assert.deepEqual(rawModes, [true, false]);
     assert.match(chunks.join(""), /row 10\/12 · ↑ more · ↓ more/u);
-    assert.match(chunks.join(""), /▶\s+●\s+10\s+SAFE/u);
+    assert.match(chunks.join(""), /▶\s+✅\s+10\s+SAFE/u);
+    assert.match(chunks.join(""), /\u001b\[32m\u001b\[1m/u);
   });
 
   it("re-audits and removes only a still-safe exact worktree", async () => {

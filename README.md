@@ -47,8 +47,10 @@ current position as `row N/M`:
 ```
 
 `◆ MAIN` rows are the primary worktrees and can never be selected. `○ SAFE`
-rows are deletion candidates. Review and unknown rows stay visible but are
-never selectable. Press `Enter` to type a slash command:
+rows are deletion candidates. `✅ SELECTED` marks rows selected for the deletion
+preview, and selected rows are green and bold in a color-capable TTY. Review
+and unknown rows stay visible but are never selectable. Press `Enter` to type a
+slash command:
 
 ```text
 /help
@@ -62,6 +64,8 @@ DELETE
 process scan and verifies the exact path, branch, commit, clean status, and
 open-file state immediately before each removal. Removal uses the non-force
 `git worktree remove` command.
+
+Set `NO_COLOR=1` to disable ANSI color while keeping the `✅` selection marker.
 
 `--root PATH` and `--repos-dir PATH` are equivalent and always take precedence.
 Discovery stops at

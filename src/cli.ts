@@ -423,6 +423,9 @@ function renderSession(
     cursorPath: state.cursorPath,
     columns: output.columns,
     rows: output.rows ?? (output.isTTY ? DEFAULT_TERMINAL_ROWS : undefined),
+    color:
+      output.color ??
+      Boolean(output.isTTY && process.env.NO_COLOR === undefined),
   });
 }
 
@@ -491,6 +494,7 @@ async function runRawInteractiveSession(
     isTTY: true,
     columns: output.columns,
     rows: output.rows,
+    color: options.output?.color,
     write(chunk) {
       lastMessage += String(chunk);
       return true;
