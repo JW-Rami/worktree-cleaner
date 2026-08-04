@@ -8,10 +8,8 @@ import {
 import { dirname, join, resolve } from "node:path";
 
 import {
-  DEFAULT_AUDIT_CONCURRENCY,
   DEFAULT_DISCOVERY_MAX_DEPTH,
   DEFAULT_WORKTREE_CONCURRENCY,
-  MAX_AUDIT_CONCURRENCY,
   MAX_WORKTREE_CONCURRENCY,
   type AuditError,
   type CliArgs,
@@ -41,8 +39,7 @@ export function parseArgs(argv: string[] = []): CliArgs {
     root: null,
     all: false,
     maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
-    concurrency: DEFAULT_AUDIT_CONCURRENCY,
-    worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
+    concurrency: DEFAULT_WORKTREE_CONCURRENCY,
     json: false,
     interactive: false,
     mergedOnly: false,
@@ -72,19 +69,10 @@ export function parseArgs(argv: string[] = []): CliArgs {
         );
       }
       args.maxDepth = value;
-    } else if (argument === "--concurrency") {
-      const value = Number(argv[++index] ?? "");
-      if (
-        !Number.isInteger(value) ||
-        value < 1 ||
-        value > MAX_AUDIT_CONCURRENCY
-      ) {
-        throw new Error(
-          `--concurrency must be an integer between 1 and ${MAX_AUDIT_CONCURRENCY}.`,
-        );
-      }
-      args.concurrency = value;
-    } else if (argument === "--worktree-concurrency") {
+    } else if (
+      argument === "--concurrency" ||
+      argument === "--worktree-concurrency"
+    ) {
       const value = Number(argv[++index] ?? "");
       if (
         !Number.isInteger(value) ||
@@ -92,10 +80,10 @@ export function parseArgs(argv: string[] = []): CliArgs {
         value > MAX_WORKTREE_CONCURRENCY
       ) {
         throw new Error(
-          `--worktree-concurrency must be an integer between 1 and ${MAX_WORKTREE_CONCURRENCY}.`,
+          `--concurrency must be an integer between 1 and ${MAX_WORKTREE_CONCURRENCY}.`,
         );
       }
-      args.worktreeConcurrency = value;
+      args.concurrency = value;
     } else if (argument === "--json") {
       args.json = true;
     } else if (argument === "--interactive" || argument === "-i") {

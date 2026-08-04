@@ -14,7 +14,6 @@ import {
   auditRepositories,
   auditWorktrees,
   buildAuditRow,
-  DEFAULT_AUDIT_CONCURRENCY,
   defaultSelection,
   DEFAULT_DISCOVERY_MAX_DEPTH,
   DEFAULT_WORKTREE_CONCURRENCY,
@@ -314,8 +313,7 @@ detached
         root: null,
         all: false,
         maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
-        concurrency: DEFAULT_AUDIT_CONCURRENCY,
-        worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
+        concurrency: DEFAULT_WORKTREE_CONCURRENCY,
         json: false,
         interactive: true,
         mergedOnly: true,
@@ -332,8 +330,7 @@ detached
         root: "/tmp/projects",
         all: false,
         maxDepth: 3,
-        concurrency: DEFAULT_AUDIT_CONCURRENCY,
-        worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
+        concurrency: DEFAULT_WORKTREE_CONCURRENCY,
         json: false,
         interactive: false,
         mergedOnly: false,
@@ -352,8 +349,7 @@ detached
       root: null,
       all: true,
       maxDepth: DEFAULT_DISCOVERY_MAX_DEPTH,
-      concurrency: DEFAULT_AUDIT_CONCURRENCY,
-      worktreeConcurrency: DEFAULT_WORKTREE_CONCURRENCY,
+      concurrency: DEFAULT_WORKTREE_CONCURRENCY,
       json: false,
       interactive: false,
       mergedOnly: false,
@@ -362,9 +358,9 @@ detached
       deepProcessScan: false,
     });
     assert.equal(parseArgs(["-all"]).all, true);
-    assert.equal(parseArgs(["--concurrency", "8"]).concurrency, 8);
+    assert.equal(parseArgs(["--concurrency", "16"]).concurrency, 16);
     assert.equal(
-      parseArgs(["--worktree-concurrency", "16"]).worktreeConcurrency,
+      parseArgs(["--worktree-concurrency", "16"]).concurrency,
       16,
     );
     assert.throws(
@@ -373,7 +369,7 @@ detached
     );
     assert.throws(
       () => parseArgs(["--worktree-concurrency", "0"]),
-      /--worktree-concurrency must be an integer/u,
+      /--concurrency must be an integer/u,
     );
   });
 

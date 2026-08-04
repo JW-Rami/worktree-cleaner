@@ -50,7 +50,6 @@ export interface CliArgs {
   all: boolean;
   maxDepth: number;
   concurrency: number;
-  worktreeConcurrency: number;
   json: boolean;
   interactive: boolean;
   mergedOnly: boolean;

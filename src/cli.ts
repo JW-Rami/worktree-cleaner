@@ -126,7 +126,7 @@ async function collectAudit(
     noGithub: args.noGithub ?? false,
     noChat: args.noChat ?? false,
     deepProcessScan: args.deepProcessScan ?? false,
-    worktreeConcurrency: args.worktreeConcurrency,
+    worktreeConcurrency: args.concurrency,
     onProgress: progressWriter(errorOutput),
   };
   const root = args.root ?? (
@@ -137,7 +137,6 @@ async function collectAudit(
         ...options,
         root,
         maxDepth: args.maxDepth ?? DEFAULT_DISCOVERY_MAX_DEPTH,
-        concurrency: args.concurrency,
       })
     : auditFn(options);
 }
@@ -371,7 +370,7 @@ export async function runCli({
   if (args.help) {
     output.write("Usage: worktree-audit [options]\n");
     output.write(
-      "Options: --all (-all) --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --concurrency N --worktree-concurrency N --merged-only --no-github --no-chat --deep-process-scan --version\n",
+      "Options: --all (-all) --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --concurrency N --merged-only --no-github --no-chat --deep-process-scan --version\n",
     );
     output.write(
       "--cwd audits one repository. Without a scope option, the parent of the current Git repository is scanned as a workspace. --all explicitly enables the same recursive workspace scan; --root sets its directory.\n",
