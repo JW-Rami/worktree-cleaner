@@ -31,5 +31,10 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      - name: Run local CI
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run local CI, including CLI interaction E2E
         run: npm run ci

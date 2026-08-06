@@ -120,12 +120,16 @@ can change when a filter changes.
 npm run ci
 npm run build
 npm test
+npm run test:e2e
 npm run check
 ```
 
-`npm run ci` is the same locked-install, typecheck, build, and test path used
-by GitHub Actions. TypeScript is compiled to `dist/`. Runtime dependencies are
-not required after `npm ci`.
+`npm run ci` is the same locked-install, typecheck, build, unit-test, and CLI
+interaction E2E path used by GitHub Actions. The E2E test launches the compiled
+CLI in a POSIX pseudo-terminal and sends real arrow and Space keys. It uses
+Python 3's standard `pty` module to provide that terminal in local and CI runs.
+TypeScript is compiled to `dist/`. Runtime dependencies are not required after
+`npm ci`.
 
 ## Supply-chain security
 

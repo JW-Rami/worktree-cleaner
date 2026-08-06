@@ -12,5 +12,11 @@ npm ci
 printf '%s\n' '==> Typecheck'
 npm run check
 
-printf '%s\n' '==> Build and test'
+printf '%s\n' '==> Check CLI E2E runtime'
+command -v python3 >/dev/null 2>&1 || {
+  printf '%s\n' 'Python 3 is required for the CLI interaction E2E test.' >&2
+  exit 1
+}
+
+printf '%s\n' '==> Build, unit tests, and CLI interaction E2E'
 npm test
