@@ -261,8 +261,6 @@ function createInteractiveController({
       );
       if (!row) {
         output.write("No worktree is focused.\n");
-      } else if (row.decision !== DECISIONS.REMOVE_CANDIDATE) {
-        output.write(`Row ${row.path} is not SAFE and was kept.\n`);
       } else if (selected.has(row.path)) {
         selected.delete(row.path);
       } else {
@@ -351,8 +349,6 @@ function createInteractiveController({
           const row = rowIndexMap(currentAudit.rows).get(index);
           if (!row || !rows.includes(row)) {
             output.write(`Row not visible: ${index}\n`);
-          } else if (row.decision !== DECISIONS.REMOVE_CANDIDATE) {
-            output.write(`Row ${index} is not SAFE and was kept.\n`);
           } else if (parsed.command === "select") {
             selected.add(row.path);
           } else {
@@ -361,12 +357,23 @@ function createInteractiveController({
         }
       } else if (parsed.command === "preview") {
         const chosen = selectedRows(currentAudit, selected);
-        if (chosen.length === 0) output.write("No deletion selected.\n");
-        else printPreview(output, chosen);
+        if (chosen.length === 0) {
+          output.write(
+            selected.size > 0
+              ? "No SAFE selection can be deleted.\n"
+              : "No deletion selected.\n",
+          );
+        } else {
+          printPreview(output, chosen);
+        }
       } else if (parsed.command === "delete") {
         const chosen = selectedRows(currentAudit, selected);
         if (chosen.length === 0) {
-          output.write("No deletion selected. Use /safe or /select.\n");
+          output.write(
+            selected.size > 0
+              ? "No SAFE selection can be deleted. Select a SAFE row.\n"
+              : "No deletion selected. Use /safe or /select.\n",
+          );
         } else {
           printPreview(output, chosen);
           output.write(

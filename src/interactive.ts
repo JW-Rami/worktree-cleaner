@@ -74,10 +74,12 @@ const DASHBOARD_ERROR_LINE_COUNT = 2;
 const DASHBOARD_PROMPT_LINE_COUNT = 2;
 const MIN_LIST_VIEWPORT_LINES = 1;
 const ANSI_GREEN = "\u001b[32m";
+const ANSI_YELLOW = "\u001b[33m";
 const ANSI_BOLD = "\u001b[1m";
 const ANSI_RESET = "\u001b[0m";
 const SELECTION_MARKERS = Object.freeze({
   selected: "✅",
+  selectedBlocked: "⚠️",
   safe: "○",
   blocked: "🔒",
   main: "◆",
@@ -88,7 +90,7 @@ Commands:
   /help                  Show this help
   /list                  Show visible worktrees
   /filter <name>         Filter: all, safe, review, unknown
-  /select <n,...>        Select visible SAFE rows by number
+  /select <n,...>        Select visible rows by number
   /safe                  Select all SAFE rows
   /clear                 Clear the selection
   /preview               Preview deletion
@@ -101,13 +103,13 @@ Commands:
 
 Keyboard:
   ↑/↓                    Move the focused row
-  Space                  Toggle the focused SAFE row
+  Space                  Toggle the focused row
   Enter                  Edit and run a command
   q                      Exit
 
-✅ marks selected rows; selected rows are green in a color-capable TTY.
-🔒 marks rows that Space cannot select because they are not SAFE. Deletion
-requires the exact DELETE confirmation and a second Git/process validation.
+✅ marks selected SAFE rows; ⚠️ marks selected rows blocked from deletion.
+Only SAFE selections can be deleted. Deletion requires the exact DELETE
+confirmation and a second Git/process validation.
 `;
 
 const MAX_PREVIEW_ROWS = 20;
@@ -314,16 +316,18 @@ function formatRow(
   }: RowFormatOptions,
 ): string {
   const cursor = row.path === cursorPath ? "▶" : " ";
-  const selection =
-    row.decision === DECISIONS.KEEP_MAIN
+  const isSelected = selected.has(row.path);
+  const isSafeSelected =
+    row.decision === DECISIONS.REMOVE_CANDIDATE && selected.has(row.path);
+  const selection = isSelected
+    ? isSafeSelected
+      ? SELECTION_MARKERS.selected
+      : SELECTION_MARKERS.selectedBlocked
+    : row.decision === DECISIONS.KEEP_MAIN
       ? SELECTION_MARKERS.main
       : row.decision === DECISIONS.REMOVE_CANDIDATE
-        ? selected.has(row.path)
-          ? SELECTION_MARKERS.selected
-          : SELECTION_MARKERS.safe
+        ? SELECTION_MARKERS.safe
         : SELECTION_MARKERS.blocked;
-  const isSelected =
-    row.decision === DECISIONS.REMOVE_CANDIDATE && selected.has(row.path);
   const repositoryLabel = row.repository ?? row.repoRoot ?? "local";
   const repository = shortenText(repositoryLabel, repositoryWidth);
   const path = shortenPath(row.path, pathWidth);
@@ -334,9 +338,9 @@ function formatRow(
   const status = statusLabel(row).padEnd(STATUS_COLUMN_WIDTH);
   const rowText = `${cursor} ${selection} ${indexLabel} ${status} ${size} ${repository.padEnd(repositoryWidth)} ${path.padEnd(pathWidth)} ${evidence.padEnd(evidenceWidth)} ${activity}`;
   const visibleRow = rowText.slice(0, columns).trimEnd();
-  return isSelected && color
-    ? `${ANSI_GREEN}${ANSI_BOLD}${visibleRow}${ANSI_RESET}`
-    : visibleRow;
+  if (!color || !isSelected) return visibleRow;
+  const ansiColor = isSafeSelected ? ANSI_GREEN : ANSI_YELLOW;
+  return `${ansiColor}${ANSI_BOLD}${visibleRow}${ANSI_RESET}`;
 }
 
 function terminalRows(rows: number | undefined): number | null {
@@ -454,7 +458,10 @@ export function renderInteractive(
     rows.map((row, index) => [row.path, index + 1]),
   );
   const safeCount = safeRows(audit.rows).length;
-  const selectedCount = selectedRows(audit, selected).length;
+  const selectedCount = audit.rows.filter((row) =>
+    selected.has(row.path),
+  ).length;
+  const safeSelectedCount = selectedRows(audit, selected).length;
   const variableColumns = width - ROW_FIXED_COLUMN_COUNT;
   const repositoryWidth = Math.max(
     MIN_REPOSITORY_COLUMN_WIDTH,
@@ -501,7 +508,7 @@ export function renderInteractive(
   const viewport = viewportForEntries(entries, cursorPath, viewportLines);
   const lines = [
     `Worktree Audit  ${shortenText(auditTitle(audit), width - 16)}`,
-    `${audit.rows.length} worktrees · ${mainCount} main · ${safeCount} safe · ${selectedCount} selected · filter=${filter}`,
+    `${audit.rows.length} worktrees · ${mainCount} main · ${safeCount} safe · ${selectedCount} selected · ${safeSelectedCount} SAFE selected · filter=${filter}`,
     "",
   ];
   if (height) {
@@ -528,8 +535,8 @@ export function renderInteractive(
     "",
     "↑/↓ move · space select · enter command · /help · q quit",
     "Commands: /safe /preview /delete /refresh /quit",
-    "✅ SELECTED · ○ SAFE selectable · 🔒 BLOCKED",
-    "◆ MAIN protected · DIRTY/REVIEW/UNKNOWN kept",
+    "✅ SAFE selected · ⚠️ blocked selected · ○ SAFE available",
+    "🔒 BLOCKED · ◆ MAIN protected · Space toggles",
   );
   if (cursorRow) {
     lines.push(

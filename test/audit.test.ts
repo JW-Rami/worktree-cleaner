@@ -49,6 +49,7 @@ import {
 import {
   moveCursor,
   parseTerminalKeys,
+  selectedRows,
 } from "../src/interactive.js";
 
 const mergedHead = "a".repeat(40);
@@ -628,7 +629,7 @@ detached
     assert.match(output, /↑\/↓ move/u);
     assert.match(output, /\/delete/u);
     assert.match(output, /✅\s+1\s+SAFE/u);
-    assert.match(output, /✅ SELECTED/u);
+    assert.match(output, /✅ SAFE selected/u);
   });
 
   it("separates primary worktrees and shortens rows to the terminal width", () => {
@@ -659,10 +660,10 @@ detached
       },
     );
 
-    assert.match(output, /1 selected/u);
+    assert.match(output, /2 selected · 1 SAFE/u);
     assert.match(output, /MAIN WORKTREES \(1\)/u);
     assert.match(output, /LINKED WORKTREES \(1\)/u);
-    assert.match(output, /◆\s+1\s+MAIN/u);
+    assert.match(output, /⚠️\s+1\s+MAIN/u);
     assert.match(output, /✅\s+2\s+SAFE/u);
     assert.match(output, /…/u);
     for (const line of output.split("\n")) {
@@ -802,7 +803,7 @@ detached
     assert.match(chunks.join(""), /\u001b\[32m\u001b\[1m/u);
   });
 
-  it("explains why Space cannot select a dirty row", async () => {
+  it("visibly selects a dirty row without making it deletable", async () => {
     const dirty = buildAuditRow({
       state: state({ path: "/tmp/dirty", dirtyCount: 1 }),
       pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
@@ -844,10 +845,18 @@ detached
     input.emit("data", "q");
 
     assert.equal(await session, 0);
-    assert.match(chunks.join(""), /▶\s+🔒\s+1\s+DIRTY/u);
-    assert.match(
-      chunks.join(""),
-      /Row \/tmp\/dirty is not SAFE and was kept\./u,
+    const rendered = chunks.join("");
+    const initialMarker = rendered.indexOf("▶ 🔒");
+    const selectedMarker = rendered.indexOf("▶ ⚠️");
+    assert.ok(initialMarker >= 0);
+    assert.ok(selectedMarker > initialMarker);
+    assert.match(rendered, /1 selected · 0 SAFE/u);
+    assert.deepEqual(
+      selectedRows(
+        { repoRoot: "/repo", repository: null, rows: [dirty] },
+        new Set([dirty.path]),
+      ),
+      [],
     );
   });
 

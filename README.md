@@ -46,12 +46,11 @@ current position as `row N/M`:
 ↑/↓ move · space select · enter command · /help · q quit
 ```
 
-`◆ MAIN` rows are the primary worktrees and can never be selected. `○ SAFE`
-rows are deletion candidates. `✅ SELECTED` marks rows selected for the deletion
-preview, and selected rows are green and bold in a color-capable TTY. Review
-DIRTY, review, and unknown rows stay visible with `🔒` and are never
-selectable. Press `Space` only on a SAFE row to toggle its selection. Press
-`Enter` to type a slash command:
+`◆ MAIN` rows are the primary worktrees and are protected from deletion. `○ SAFE`
+rows are deletion candidates. `✅` marks a selected SAFE row; `⚠️` marks a
+selected blocked row. Selected rows are colored and bold in a color-capable TTY.
+Only SAFE selections can be deleted. Unselected blocked rows show `🔒`. Press
+`Space` to toggle the focused row. Press `Enter` to type a slash command:
 
 ```text
 /help
@@ -66,7 +65,7 @@ process scan and verifies the exact path, branch, commit, clean status, and
 open-file state immediately before each removal. Removal uses the non-force
 `git worktree remove` command.
 
-Set `NO_COLOR=1` to disable ANSI color while keeping the `✅` selection marker.
+Set `NO_COLOR=1` to disable ANSI color while keeping the selection markers.
 
 `--root PATH` and `--repos-dir PATH` are equivalent and always take precedence.
 Discovery stops at
@@ -101,7 +100,7 @@ partial discovery without treating it as a complete scan. A non-TTY without
 | `/help`        | Show the command reference         |
 | `/list`        | Show the current dashboard         |
 | `/filter safe` | Show only deletion candidates      |
-| `/select 2,4`  | Select visible SAFE rows by number |
+| `/select 2,4`  | Select visible rows by number       |
 | `/safe`        | Select all safe rows               |
 | `/clear`       | Clear the selection                |
 | `/preview`     | Review the exact paths and commits |
@@ -111,8 +110,9 @@ partial discovery without treating it as a complete scan. A non-TTY without
 | `/quit`        | Exit without deleting              |
 
 Arrow-key selection is equivalent to `/select`: focus a row with `↑` or `↓`,
-press `Space` to toggle a SAFE row, then use `/preview` and `/delete`. Row
-numbers follow the current visible order and can change when a filter changes.
+press `Space` to toggle it, then use `/preview` and `/delete`. Only SAFE rows
+enter the deletion preview. Row numbers follow the current visible order and
+can change when a filter changes.
 
 ## Development
 
