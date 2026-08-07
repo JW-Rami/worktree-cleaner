@@ -10,15 +10,9 @@ long paths, scrolls with the cursor, and supports multi-selection.
 
 ## Demo
 
-<video
-  src="https://raw.githubusercontent.com/JW-Rami/worktree-cleaner/main/assets/worktree-cleaner-demo.mp4"
-  controls
-  muted
-  playsinline
-  width="960"
-></video>
+The preview plays inline on GitHub. Click it to open the full MP4.
 
-[Download the terminal demo](assets/worktree-cleaner-demo.mp4)
+[![Worktree Cleaner CLI demo](assets/worktree-cleaner-demo.gif)](assets/worktree-cleaner-demo.mp4)
 
 ## Quick start
 
