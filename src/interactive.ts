@@ -262,8 +262,6 @@ function blockingReason(row: AuditRow): string | null {
   }
   if (row.chat.kind === "UNKNOWN_CHAT") {
     reasons.push("Codex chat evidence unavailable");
-  } else if (row.chat.kind !== "EXACT") {
-    reasons.push(`Codex chat: ${compactChat(row)}`);
   }
   return reasons.length > 0 ? reasons.join(" · ") : null;
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   existsSync,
@@ -12,11 +12,13 @@ import {
 import { describe, it } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough, Writable } from "node:stream";
 
 import {
   auditRepositories,
   auditWorktrees,
   buildAuditRow,
+  createCodexChatLookup,
   defaultSelection,
   DEFAULT_DISCOVERY_MAX_DEPTH,
   DEFAULT_WORKTREE_CONCURRENCY,
@@ -136,6 +138,62 @@ detached
     assert.equal(
       repositoryFromRemote("https://github.com/The-JW-Corp/Invisible"),
       "The-JW-Corp/Invisible",
+    );
+  });
+
+  it("loads the Codex thread index once for multiple worktree lookups", async () => {
+    const inputMessages: Array<{ id?: number; method?: string }> = [];
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const input = new Writable({
+      write(chunk, _encoding, callback) {
+        const message = JSON.parse(String(chunk)) as {
+          id?: number;
+          method?: string;
+        };
+        inputMessages.push(message);
+        if (message.id === 1) {
+          stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+        } else if (message.method === "thread/list") {
+          stdout.write(
+            `${JSON.stringify({
+              id: message.id,
+              result: {
+                data: [
+                  { id: "chat-a", cwd: "/repo/a", status: "idle" },
+                ],
+                nextCursor: null,
+              },
+            })}\n`,
+          );
+        }
+        callback();
+      },
+    });
+    const child = Object.assign(new EventEmitter(), {
+      stdin: input,
+      stdout,
+      stderr,
+      kill() {
+        return true;
+      },
+    }) as unknown as ChildProcess;
+    const lookup = createCodexChatLookup({
+      spawnImpl: (() => child) as typeof import("node:child_process").spawn,
+    });
+
+    const [repoA, repoB] = await Promise.all([
+      lookup("/repo/a"),
+      lookup("/repo/b"),
+    ]);
+    lookup.close?.();
+
+    assert.equal(repoA.kind, "EXACT");
+    assert.equal(repoB.kind, "NO_CHAT");
+    assert.equal(
+      inputMessages.filter((message) => message.method === "thread/list")
+        .length,
+      1,
     );
   });
 
@@ -270,6 +328,18 @@ detached
         message: "1 ignored file is not classified as rebuildable",
       },
     ]);
+  });
+
+  it("treats a verified absence of a Codex chat as safe evidence", () => {
+    const row = buildAuditRow({
+      state: state(),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "NO_CHAT", threads: [] },
+      mainPath: "/repo",
+    });
+
+    assert.equal(row.decision, "REMOVE_CANDIDATE");
+    assert.deepEqual(row.warnings, []);
   });
 
   it("reports unavailable local checks as warnings", () => {
@@ -669,6 +739,26 @@ detached
     assert.match(output, /\/delete/u);
     assert.match(output, /✅\s+1\s+SAFE/u);
     assert.match(output, /✅ SAFE selected/u);
+  });
+
+  it("does not present a verified absence of a Codex chat as a blocker", () => {
+    const row = buildAuditRow({
+      state: state(),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "NO_CHAT", threads: [] },
+      mainPath: "/repo",
+    });
+    const output = renderInteractive(
+      {
+        repoRoot: "/repo",
+        repository: "The-JW-Corp/Invisible",
+        rows: [row],
+      },
+      { cursorPath: row.path },
+    );
+
+    assert.match(output, /#42 mer.*nochat/u);
+    assert.doesNotMatch(output, /Blocked: Codex chat: nochat/u);
   });
 
   it("separates primary worktrees and shortens rows to the terminal width", () => {

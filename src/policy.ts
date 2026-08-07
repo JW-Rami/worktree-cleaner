@@ -26,7 +26,7 @@ function decisionFor({
   chat: ChatEvidence;
 }): Decision {
   if (isMain) return DECISIONS.KEEP_MAIN;
-  if (pr.kind === "MERGED_EXACT" && chat.kind === "EXACT")
+  if (pr.kind === "MERGED_EXACT" && chat.kind !== "UNKNOWN_CHAT")
     return DECISIONS.REMOVE_CANDIDATE;
   if (pr.kind === "UNKNOWN_GITHUB" || chat.kind === "UNKNOWN_CHAT")
     return DECISIONS.UNKNOWN;

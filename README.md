@@ -8,6 +8,18 @@ and matches them with GitHub pull requests and Codex chats. The dashboard is
 designed for large workspaces: it groups main and linked worktrees, shortens
 long paths, scrolls with the cursor, and supports multi-selection.
 
+## Demo
+
+<video
+  src="https://raw.githubusercontent.com/JW-Rami/worktree-cleaner/main/assets/worktree-cleaner-demo.mp4"
+  controls
+  muted
+  playsinline
+  width="960"
+></video>
+
+[Download the terminal demo](assets/worktree-cleaner-demo.mp4)
+
 ## Quick start
 
 Requirements: Node.js 20+, Git, and a terminal. `gh` and `codex` are optional,

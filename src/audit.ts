@@ -35,13 +35,11 @@ import {
   parseArgs,
   parseWorktreeList,
 } from "./discovery.js";
-import {
-  createCodexChatLookup,
-  groupChatThreadsByCwd,
-} from "./chat.js";
+import { createCodexChatLookup } from "./chat.js";
 import {
   getRepositorySlug,
   loadPullRequests,
+  matchPullRequest,
   queryPullRequest,
 } from "./github.js";
 import { buildAuditRow } from "./policy.js";
@@ -199,15 +197,34 @@ async function prepareAuditContext({
     : loadPullRequests(repository, runCommand);
 
   onProgress({ stage: PROGRESS_STAGES.CHATS });
-  const chatResults = await Promise.all(
-    worktrees.map((worktree) => lookup(worktree.path)),
+  const chatWorktrees =
+    pullRequests === null
+      ? []
+      : worktrees.filter(
+          (worktree) =>
+            matchPullRequest({
+              branch: worktree.branch ?? null,
+              head: worktree.head ?? "",
+              pullRequests,
+            }).kind === "MERGED_EXACT",
+        );
+  let chatResults: ChatEvidence[];
+  try {
+    chatResults = await mapWithConcurrency(
+      chatWorktrees,
+      worktreeConcurrency,
+      (worktree) => lookup(worktree.path),
+    );
+  } finally {
+    lookup.close?.();
+  }
+
+  const chatsByPath = new Map<string, ChatEvidence>(
+    worktrees.map((worktree) => [worktree.path, unknownChatEvidence()]),
   );
-  const chatResult: ChatEvidence = {
-    kind: chatResults.some((result) => result.kind === "UNKNOWN_CHAT")
-      ? "UNKNOWN_CHAT"
-      : "EXACT",
-    threads: chatResults.flatMap((result) => result.threads ?? []),
-  };
+  chatWorktrees.forEach((worktree, index) => {
+    chatsByPath.set(worktree.path, chatResults[index]);
+  });
 
   return {
     repoRoot,
@@ -216,10 +233,7 @@ async function prepareAuditContext({
     processPaths,
     sizes,
     pullRequests,
-    chatsByPath: groupChatThreadsByCwd(
-      worktrees.map((worktree) => worktree.path),
-      chatResult,
-    ),
+    chatsByPath,
   };
 }
 

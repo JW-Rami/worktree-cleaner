@@ -195,7 +195,10 @@ export interface AggregateAudit {
 
 export type Audit = SingleAudit | AggregateAudit;
 
-export type ChatLookup = (cwd: string) => Promise<ChatEvidence>;
+export interface ChatLookup {
+  (cwd: string): Promise<ChatEvidence>;
+  close?: () => void;
+}
 
 export interface AuditWorktreeOptions {
   cwd?: string;
