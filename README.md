@@ -3,8 +3,10 @@
 An interactive terminal assistant for reviewing and reclaiming Git worktrees.
 
 It correlates local Git state with GitHub pull requests and Codex chats when
-those tools are available. It fails closed when evidence is missing, stale,
-ambiguous, dirty, or active.
+those tools are available. Missing, stale, or ambiguous identity evidence stays
+blocked. Local risk signals are warnings, so a confirmed candidate remains
+selectable when it is dirty, has open processes, contains unclassified ignored
+files, or has an active Codex chat.
 
 ## Quick start
 
@@ -47,10 +49,10 @@ current position as `row N/M`:
 ```
 
 `◆ MAIN` rows are the primary worktrees and are protected from deletion. `○ SAFE`
-rows are deletion candidates. `✅` marks a selected SAFE row; `⚠️` marks a
-selected blocked row. Selected rows are colored and bold in a color-capable TTY.
-Only SAFE selections can be deleted. Unselected blocked rows show `🔒`. Press
-`Space` to toggle the focused row. Press `Enter` to type a slash command:
+rows are deletion candidates. `⚠️` marks a SAFE row with local warnings, while
+`✅` marks a selected SAFE row. `🔒` marks a row blocked by missing or ambiguous
+identity evidence. Selected rows are colored and bold in a color-capable TTY.
+Press `Space` to toggle the focused row. Press `Enter` to type a slash command:
 
 ```text
 /help
@@ -61,9 +63,23 @@ DELETE
 ```
 
 `DELETE` is required after the preview. The CLI re-runs the audit with a deep
-process scan and verifies the exact path, branch, commit, clean status, and
-open-file state immediately before each removal. Removal uses the non-force
-`git worktree remove` command.
+process scan and verifies the exact path, branch, and commit immediately before
+each removal. Clean SAFE rows use `git worktree remove`. SAFE rows with warnings
+use `git worktree remove --force` only after the exact `DELETE` confirmation.
+This can remove uncommitted or ignored data, so the warning is intentional.
+
+The local warnings mean:
+
+- `DIRTY`: Git reports uncommitted changes or the status check was unavailable.
+- `OPEN PROCESSES`: a process has this worktree, or the process scan was unavailable.
+- `IGNORED`: ignored files are present but are not recognized as rebuildable
+  directories such as `node_modules`, `dist`, `build`, or `.next`, or the scan
+  was unavailable.
+- `ACTIVE CODEX CHAT`: an exact Codex chat matched the worktree and reports the
+  `active` status. It is a warning, not proof that the chat is currently writing.
+
+`/preview` shows these warnings before confirmation. `/delete` never removes a
+row blocked by missing, stale, or ambiguous GitHub or Codex identity evidence.
 
 Set `NO_COLOR=1` to disable ANSI color while keeping the selection markers.
 
@@ -110,9 +126,9 @@ partial discovery without treating it as a complete scan. A non-TTY without
 | `/quit`        | Exit without deleting              |
 
 Arrow-key selection is equivalent to `/select`: focus a row with `↑` or `↓`,
-press `Space` to toggle it, then use `/preview` and `/delete`. Only SAFE rows
-enter the deletion preview. Row numbers follow the current visible order and
-can change when a filter changes.
+press `Space` to toggle it, then use `/preview` and `/delete`. SAFE rows with
+warnings enter the deletion preview; blocked rows do not. Row numbers follow
+the current visible order and can change when a filter changes.
 
 ## Development
 

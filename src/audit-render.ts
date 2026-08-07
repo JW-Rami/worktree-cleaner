@@ -52,6 +52,7 @@ function auditSummary(rows: AuditRow[]): string {
   return [
     `${rows.length} worktrees`,
     `${counts.SAFE ?? 0} safe`,
+    `${rows.filter((row) => (row.warnings ?? []).length > 0).length} warnings`,
     `${counts.REVIEW ?? 0} review`,
     `${counts.UNKNOWN ?? 0} unknown`,
   ].join(" · ");
@@ -60,7 +61,10 @@ function auditSummary(rows: AuditRow[]): string {
 function compactAuditLine(row: AuditRow): string {
   const repositoryLabel = row.repository ?? row.repoRoot;
   const scope = repositoryLabel ? `[${shortenText(repositoryLabel, 28)}] ` : "";
-  return `${row.marker} ${row.size.padStart(9)} ${decisionLabel(row.decision).padEnd(7)} ${scope}${shortenText(row.path, MAX_PATH_DISPLAY_LENGTH)} · ${shortenText(pullRequestLabel(row), 22)} · 💬 ${shortenText(chatLabel(row), 28)} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}`;
+  const warningLabel = (row.warnings ?? []).length > 0
+    ? ` · ⚠️ ${(row.warnings ?? []).map((warning) => warning.message).join(" · ")}`
+    : "";
+  return `${row.marker} ${row.size.padStart(9)} ${decisionLabel(row.decision).padEnd(7)} ${scope}${shortenText(row.path, MAX_PATH_DISPLAY_LENGTH)} · ${shortenText(pullRequestLabel(row), 22)} · 💬 ${shortenText(chatLabel(row), 28)} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}${warningLabel}`;
 }
 
 export function renderAudit(

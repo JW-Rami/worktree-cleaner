@@ -3,6 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   mkdtempSync,
+  mkdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -26,6 +27,11 @@ interface PtyResult {
   output: string;
 }
 
+interface GitFixture {
+  repositoryRoot: string;
+  tempRoot: string;
+}
+
 function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, {
     cwd,
@@ -33,8 +39,10 @@ function runGit(cwd: string, args: string[]): void {
   });
 }
 
-function createGitFixture(): string {
-  const root = mkdtempSync(join(tmpdir(), "worktree-audit-cli-e2e-"));
+function createGitFixture(): GitFixture {
+  const tempRoot = mkdtempSync(join(tmpdir(), "worktree-audit-cli-e2e-"));
+  const root = join(tempRoot, "repo");
+  mkdirSync(root);
 
   try {
     writeFileSync(join(root, "README.md"), "# CLI E2E fixture\n");
@@ -50,11 +58,11 @@ function createGitFixture(): string {
       "--quiet",
       "-b",
       LINKED_BRANCH,
-      join(root, "linked"),
+      join(tempRoot, "linked"),
     ]);
-    return root;
+    return { repositoryRoot: root, tempRoot };
   } catch (error) {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
     throw error;
   }
 }
@@ -194,18 +202,22 @@ describe("CLI interaction E2E", () => {
       timeout: PTY_TIMEOUT_MS,
     },
     async () => {
-      const fixtureRoot = createGitFixture();
+      const fixture = createGitFixture();
 
       try {
-        const result = await runCliInPty(fixtureRoot);
+        const result = await runCliInPty(fixture.repositoryRoot);
 
         assert.equal(result.code, 0, result.output);
         assert.match(result.output, /▶\s+◆\s+1\s+MAIN/u);
         assert.match(result.output, /▶\s+⚠️\s+2\s+UNKNOWN/u);
-        assert.match(result.output, /1 selected · 0 SAFE selected/u);
+        assert.match(result.output, /1 selected · 0 SAFE/u);
+        assert.match(
+          result.output,
+          /Blocked: GitHub PR evidence unavailable/u,
+        );
         assert.match(result.output, /Session ended\./u);
       } finally {
-        rmSync(fixtureRoot, { recursive: true, force: true });
+        rmSync(fixture.tempRoot, { recursive: true, force: true });
       }
     },
   );

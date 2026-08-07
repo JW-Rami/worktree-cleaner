@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
@@ -29,6 +31,7 @@ import {
   repositoryFromRemote,
   removeWorktree,
   renderAudit,
+  verifyRemovalTarget,
   type AggregateAudit,
   type AuditRow,
   type ChatEvidence,
@@ -37,6 +40,7 @@ import {
   type PullRequest,
   type PullRequestEvidence,
   type WorktreeState,
+  WARNING_CODES,
 } from "../src/audit.js";
 import {
   executeDeletion,
@@ -49,6 +53,7 @@ import {
 import {
   moveCursor,
   parseTerminalKeys,
+  printPreview,
   selectedRows,
 } from "../src/interactive.js";
 
@@ -204,7 +209,7 @@ detached
     }
   });
 
-  it("does not select a dirty or active worktree for removal", () => {
+  it("keeps local risk as warnings while preserving deletion evidence", () => {
     const mergedChat: ChatEvidence = {
       kind: "EXACT",
       threads: [{ id: "chat-1", title: "Feature A", status: "idle" }],
@@ -236,15 +241,21 @@ detached
     });
 
     assert.equal(candidate.decision, "REMOVE_CANDIDATE");
-    assert.equal(dirty.decision, "KEEP_DIRTY");
-    assert.equal(active.decision, "KEEP_ACTIVE_CHAT");
+    assert.equal(dirty.decision, "REMOVE_CANDIDATE");
+    assert.equal(active.decision, "REMOVE_CANDIDATE");
+    assert.deepEqual(dirty.warnings.map((warning) => warning.code), [
+      WARNING_CODES.DIRTY_WORKTREE,
+    ]);
+    assert.deepEqual(active.warnings.map((warning) => warning.code), [
+      WARNING_CODES.ACTIVE_CODEX_CHAT,
+    ]);
     assert.deepEqual(
       defaultSelection([candidate, dirty, active]),
-      new Set([candidate.path]),
+      new Set([candidate.path, dirty.path, active.path]),
     );
   });
 
-  it("keeps ambiguous ignored data in review", () => {
+  it("shows unclassified ignored files as a deletion warning", () => {
     const row = buildAuditRow({
       state: state({ ignoredUnknownCount: 1 }),
       pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
@@ -252,8 +263,36 @@ detached
       mainPath: "/repo",
     });
 
-    assert.equal(row.decision, "REVIEW");
-    assert.equal(row.marker, "🟡");
+    assert.equal(row.decision, "REMOVE_CANDIDATE");
+    assert.deepEqual(row.warnings, [
+      {
+        code: WARNING_CODES.IGNORED_FILES_UNVERIFIED,
+        message: "1 ignored file is not classified as rebuildable",
+      },
+    ]);
+  });
+
+  it("reports unavailable local checks as warnings", () => {
+    const row = buildAuditRow({
+      state: state({
+        dirtyCount: null,
+        ignoredUnknownCount: null,
+        openProcessCount: null,
+      }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+
+    assert.equal(row.decision, "REMOVE_CANDIDATE");
+    assert.deepEqual(
+      row.warnings.map((warning) => warning.code),
+      [
+        WARNING_CODES.DIRTY_STATUS_UNAVAILABLE,
+        WARNING_CODES.PROCESS_SCAN_UNAVAILABLE,
+        WARNING_CODES.IGNORED_SCAN_UNAVAILABLE,
+      ],
+    );
   });
 
   it("associates chats by exact cwd and ignores unrelated PR mentions", () => {
@@ -671,7 +710,7 @@ detached
     }
   });
 
-  it("shows non-safe rows as locked in the selection gutter", () => {
+  it("shows local risk rows as warnings in the selection gutter", () => {
     const dirty = buildAuditRow({
       state: state({ path: "/tmp/dirty", dirtyCount: 1 }),
       pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
@@ -683,7 +722,26 @@ detached
       { columns: 80, cursorPath: dirty.path },
     );
 
-    assert.match(output, /▶\s+🔒\s+1\s+DIRTY/u);
+    assert.match(output, /▶\s+⚠️\s+1\s+SAFE/u);
+    assert.match(output, /Warnings: 1 uncommitted change/u);
+  });
+
+  it("shows local warnings in the deletion preview", () => {
+    const dirty = buildAuditRow({
+      state: state({ dirtyCount: 1 }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const chunks: string[] = [];
+
+    printPreview(
+      { write(chunk: string) { chunks.push(chunk); } },
+      [dirty],
+    );
+
+    assert.match(chunks.join(""), /Deletion preview \(1\)/u);
+    assert.match(chunks.join(""), /⚠️ 1 uncommitted change/u);
   });
 
   it("scrolls the terminal viewport to keep the focused row visible", () => {
@@ -803,7 +861,7 @@ detached
     assert.match(chunks.join(""), /\u001b\[32m\u001b\[1m/u);
   });
 
-  it("visibly selects a dirty row without making it deletable", async () => {
+  it("visibly selects a dirty row as a warning candidate", async () => {
     const dirty = buildAuditRow({
       state: state({ path: "/tmp/dirty", dirtyCount: 1 }),
       pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
@@ -846,18 +904,60 @@ detached
 
     assert.equal(await session, 0);
     const rendered = chunks.join("");
-    const initialMarker = rendered.indexOf("▶ 🔒");
-    const selectedMarker = rendered.indexOf("▶ ⚠️");
+    const initialMarker = rendered.indexOf("▶ ⚠️");
+    const selectedMarker = rendered.indexOf("▶ ✅");
     assert.ok(initialMarker >= 0);
     assert.ok(selectedMarker > initialMarker);
-    assert.match(rendered, /1 selected · 0 SAFE/u);
+    assert.match(rendered, /1 selected · 1 SAFE/u);
+    assert.match(rendered, /uncommitted change/u);
     assert.deepEqual(
       selectedRows(
         { repoRoot: "/repo", repository: null, rows: [dirty] },
         new Set([dirty.path]),
       ),
-      [],
+      [dirty],
     );
+  });
+
+  it("force-removes a warning candidate only after fresh explicit confirmation", async () => {
+    const dirty = buildAuditRow({
+      state: state({ dirtyCount: 1 }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const calls: Array<Record<string, unknown>> = [];
+    const result = await executeDeletion({
+      audit: { repoRoot: "/repo", repository: null, rows: [dirty] },
+      paths: [dirty.path],
+      args: {
+        cwd: "/repo",
+        cwdExplicit: true,
+        noGithub: false,
+        noChat: false,
+      },
+      output: { write() {} },
+      errorOutput: { write() {} },
+      auditFn: async () => ({
+        repoRoot: "/repo",
+        repository: null,
+        rows: [dirty],
+      }),
+      verifyFn({ allowWarnings }) {
+        calls.push({ action: "verify", allowWarnings });
+        return true;
+      },
+      removeFn({ force }) {
+        calls.push({ action: "remove", force });
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    assert.equal(result.removed, 1);
+    assert.deepEqual(calls, [
+      { action: "verify", allowWarnings: true },
+      { action: "remove", force: true },
+    ]);
   });
 
   it("re-audits and removes only a still-safe exact worktree", async () => {
@@ -1036,5 +1136,95 @@ detached
         args: ["-C", "/repo", "worktree", "remove", "--", "/tmp/worktree-a"],
       },
     ]);
+  });
+
+  it("uses force only when removing a warning worktree", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const result = removeWorktree({
+      repoRoot: "/repo",
+      path: "/tmp/worktree-a",
+      force: true,
+      runCommand(command: string, args: string[]) {
+        calls.push({ command, args });
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    assert.equal(result.status, 0);
+    assert.deepEqual(calls[0]?.args, [
+      "-C",
+      "/repo",
+      "worktree",
+      "remove",
+      "--force",
+      "--",
+      "/tmp/worktree-a",
+    ]);
+  });
+
+  it("removes a dirty linked worktree through the real forced Git path", () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "worktree-audit-force-remove-")),
+    );
+    const linked = join(root, "linked");
+    const runGit = (args: string[]): void => {
+      execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    };
+
+    try {
+      writeFileSync(join(root, "README.md"), "fixture\n");
+      runGit(["init", "--quiet"]);
+      runGit(["config", "user.email", "cli-e2e@example.invalid"]);
+      runGit(["config", "user.name", "CLI E2E"]);
+      runGit(["config", "commit.gpgSign", "false"]);
+      runGit(["add", "README.md"]);
+      runGit(["commit", "--quiet", "-m", "fixture"]);
+      runGit(["worktree", "add", "--quiet", "-b", "dirty", linked]);
+      writeFileSync(join(linked, "uncommitted.txt"), "keep warning\n");
+      const linkedHead = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: linked,
+        encoding: "utf8",
+      }).trim();
+
+      const row = buildAuditRow({
+        state: state({
+          path: linked,
+          branch: "dirty",
+          head: linkedHead,
+          dirtyCount: 1,
+          ignoredUnknownCount: 0,
+          openProcessCount: 0,
+        }),
+        pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+        chat: { kind: "EXACT", threads: [] },
+        mainPath: root,
+      });
+
+      assert.equal(
+        verifyRemovalTarget({
+          repoRoot: root,
+          row,
+          allowWarnings: true,
+        }),
+        true,
+      );
+      const result = removeWorktree({
+        repoRoot: root,
+        path: linked,
+        force: true,
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(existsSync(linked), false);
+      assert.doesNotMatch(
+        execFileSync("git", ["worktree", "list", "--porcelain"], {
+          cwd: root,
+          encoding: "utf8",
+        }),
+        /worktree .*linked/u,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

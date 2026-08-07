@@ -7,10 +7,12 @@ import {
   MAX_AUDIT_CONCURRENCY,
   MAX_WORKTREE_CONCURRENCY,
   PROGRESS_STAGES,
+  WARNING_CODES,
   type AsyncCommandRunner,
   type AggregateAudit,
   type AggregateRow,
   type AuditError,
+  type AuditWarning,
   type AuditRepositoriesOptions,
   type AuditRow,
   type AuditWorktreeOptions,
@@ -23,6 +25,7 @@ import {
   type SingleAudit,
   type Worktree,
   type WorktreeState,
+  type WarningCode,
 } from "./domain.js";
 import { commandResult, commandResultAsync } from "./command.js";
 import { mapWithConcurrency } from "./concurrency.js";
@@ -57,12 +60,14 @@ export {
   MAX_AUDIT_CONCURRENCY,
   MAX_WORKTREE_CONCURRENCY,
   PROGRESS_STAGES,
+  WARNING_CODES,
 } from "./domain.js";
 export type {
   AggregateAudit,
   AggregateRow,
   Audit,
   AuditError,
+  AuditWarning,
   AuditRepositoriesFunction,
   AuditRepositoriesOptions,
   AuditRepositoryFunction,
@@ -90,6 +95,7 @@ export type {
   SingleAudit,
   Worktree,
   WorktreeState,
+  WarningCode,
 } from "./domain.js";
 export { commandResult, commandResultAsync } from "./command.js";
 export {

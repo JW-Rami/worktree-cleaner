@@ -140,12 +140,31 @@ export interface ChatEvidence {
   threads: ChatThread[];
 }
 
+export const WARNING_CODES = Object.freeze({
+  DIRTY_WORKTREE: "DIRTY_WORKTREE",
+  DIRTY_STATUS_UNAVAILABLE: "DIRTY_STATUS_UNAVAILABLE",
+  OPEN_PROCESSES: "OPEN_PROCESSES",
+  PROCESS_SCAN_UNAVAILABLE: "PROCESS_SCAN_UNAVAILABLE",
+  IGNORED_FILES_UNVERIFIED: "IGNORED_FILES_UNVERIFIED",
+  IGNORED_SCAN_UNAVAILABLE: "IGNORED_SCAN_UNAVAILABLE",
+  ACTIVE_CODEX_CHAT: "ACTIVE_CODEX_CHAT",
+} as const);
+
+export type WarningCode =
+  (typeof WARNING_CODES)[keyof typeof WARNING_CODES];
+
+export interface AuditWarning {
+  code: WarningCode;
+  message: string;
+}
+
 export interface AuditRow extends WorktreeState {
   pr: PullRequestEvidence;
   chat: ChatEvidence;
   decision: Decision;
   marker: string;
   size: string;
+  warnings: AuditWarning[];
   repoRoot?: string;
   repository?: string | null;
 }
@@ -209,6 +228,7 @@ export type AuditRepositoriesFunction = (
 export interface RemovalTargetOptions {
   repoRoot: string;
   row: AuditRow;
+  allowWarnings?: boolean;
   runCommand?: CommandRunner;
 }
 

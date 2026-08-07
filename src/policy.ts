@@ -1,5 +1,7 @@
 import {
   DECISIONS,
+  WARNING_CODES,
+  type AuditWarning,
   type AuditRow,
   type ChatEvidence,
   type Decision,
@@ -10,36 +12,93 @@ import { hasActiveChat } from "./chat.js";
 
 const KIB_PER_GIB = 1024 * 1024;
 
-function chatDecision(chat: ChatEvidence): { kind: string; active: boolean } {
-  if (chat.kind === "UNKNOWN_CHAT") return { kind: "UNKNOWN", active: false };
-  if (hasActiveChat(chat)) return { kind: "ACTIVE", active: true };
-  return { kind: chat.kind, active: false };
+function hasActiveCodexChat(chat: ChatEvidence): boolean {
+  return chat.kind !== "UNKNOWN_CHAT" && hasActiveChat(chat);
 }
 
 function decisionFor({
   isMain,
-  state,
   pr,
   chat,
 }: {
   isMain: boolean;
-  state: WorktreeState;
   pr: PullRequestEvidence;
   chat: ChatEvidence;
 }): Decision {
   if (isMain) return DECISIONS.KEEP_MAIN;
-  if (state.dirtyCount !== null && state.dirtyCount > 0)
-    return DECISIONS.KEEP_DIRTY;
-  if (state.openProcessCount === null || state.openProcessCount > 0)
-    return DECISIONS.REVIEW;
-  if (state.ignoredUnknownCount !== null && state.ignoredUnknownCount > 0)
-    return DECISIONS.REVIEW;
-  if (chatDecision(chat).active) return DECISIONS.KEEP_ACTIVE_CHAT;
   if (pr.kind === "MERGED_EXACT" && chat.kind === "EXACT")
     return DECISIONS.REMOVE_CANDIDATE;
   if (pr.kind === "UNKNOWN_GITHUB" || chat.kind === "UNKNOWN_CHAT")
     return DECISIONS.UNKNOWN;
   return DECISIONS.REVIEW;
+}
+
+function countLabel(
+  count: number,
+  singular: string,
+  plural = `${singular}s`,
+): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function localWarnings(
+  state: WorktreeState,
+  chat: ChatEvidence,
+): AuditWarning[] {
+  const warnings: AuditWarning[] = [];
+
+  if (state.dirtyCount === null) {
+    warnings.push({
+      code: WARNING_CODES.DIRTY_STATUS_UNAVAILABLE,
+      message: "Working-tree status unavailable",
+    });
+  } else if (state.dirtyCount > 0) {
+    warnings.push({
+      code: WARNING_CODES.DIRTY_WORKTREE,
+      message: countLabel(state.dirtyCount, "uncommitted change"),
+    });
+  }
+
+  if (state.openProcessCount === null) {
+    warnings.push({
+      code: WARNING_CODES.PROCESS_SCAN_UNAVAILABLE,
+      message: "Open-process scan unavailable",
+    });
+  } else if (state.openProcessCount > 0) {
+    warnings.push({
+      code: WARNING_CODES.OPEN_PROCESSES,
+      message: countLabel(
+        state.openProcessCount,
+        "process is using this worktree",
+        "processes are using this worktree",
+      ),
+    });
+  }
+
+  if (state.ignoredUnknownCount === null) {
+    warnings.push({
+      code: WARNING_CODES.IGNORED_SCAN_UNAVAILABLE,
+      message: "Ignored-file scan unavailable",
+    });
+  } else if (state.ignoredUnknownCount > 0) {
+    warnings.push({
+      code: WARNING_CODES.IGNORED_FILES_UNVERIFIED,
+      message: countLabel(
+        state.ignoredUnknownCount,
+        "ignored file is not classified as rebuildable",
+        "ignored files are not classified as rebuildable",
+      ),
+    });
+  }
+
+  if (hasActiveCodexChat(chat)) {
+    warnings.push({
+      code: WARNING_CODES.ACTIVE_CODEX_CHAT,
+      message: "Codex chat is active",
+    });
+  }
+
+  return warnings;
 }
 
 function formatGib(sizeKib: number | null): string {
@@ -66,7 +125,7 @@ export function buildAuditRow({
   mainPath: string;
 }): AuditRow {
   const isMain = state.path === mainPath;
-  const decision = decisionFor({ isMain, state, pr, chat });
+  const decision = decisionFor({ isMain, pr, chat });
   return {
     ...state,
     pr,
@@ -74,5 +133,6 @@ export function buildAuditRow({
     decision,
     marker: markerFor(decision),
     size: formatGib(state.sizeKib),
+    warnings: localWarnings(state, chat),
   };
 }

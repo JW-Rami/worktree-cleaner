@@ -379,26 +379,36 @@ export function defaultSelection(rows: AuditRow[]): Set<string> {
 export function removeWorktree({
   repoRoot,
   path,
+  force = false,
   runCommand = commandResult,
 }: {
   repoRoot: string;
   path: string;
+  force?: boolean;
   runCommand?: CommandRunner;
 }): CommandResult {
-  return runCommand("git", ["-C", repoRoot, "worktree", "remove", "--", path]);
+  return runCommand("git", [
+    "-C",
+    repoRoot,
+    "worktree",
+    "remove",
+    ...(force ? ["--force"] : []),
+    "--",
+    path,
+  ]);
 }
 
 export function verifyRemovalTarget({
   repoRoot,
   row,
+  allowWarnings = false,
   runCommand = commandResult,
 }: RemovalTargetOptions): boolean {
+  if (!existsSync(row.path)) return false;
   if (
-    !existsSync(row.path) ||
-    row.dirtyCount !== 0 ||
-    row.ignoredUnknownCount !== 0
-  )
-    return false;
+    !allowWarnings &&
+    (row.dirtyCount !== 0 || row.ignoredUnknownCount !== 0)
+  ) return false;
   const registered = runCommand("git", [
     "-C",
     repoRoot,
@@ -411,14 +421,17 @@ export function verifyRemovalTarget({
   );
   if (!current || current.head !== row.head || current.branch !== row.branch)
     return false;
-  const status = runCommand("git", [
-    "-C",
-    row.path,
-    "status",
-    "--porcelain=v1",
-    "--untracked-files=all",
-  ]);
-  if (status.status !== 0 || status.stdout.trim().length > 0) return false;
+  if (!allowWarnings) {
+    const status = runCommand("git", [
+      "-C",
+      row.path,
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ]);
+    if (status.status !== 0 || status.stdout.trim().length > 0) return false;
+  }
+  if (allowWarnings) return true;
   const openFiles = runCommand("lsof", ["-F", "p", "+D", row.path]);
   return countOpenProcesses(openFiles) === 0;
 }

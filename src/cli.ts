@@ -67,6 +67,7 @@ type AuditFunction = (
 type RemoveFunction = (options: {
   repoRoot: string;
   path: string;
+  force?: boolean;
 }) => CommandResult;
 type VerifyFunction = (options: RemovalTargetOptions) => boolean;
 
@@ -175,12 +176,20 @@ export async function executeDeletion({
       !row ||
       row.decision !== DECISIONS.REMOVE_CANDIDATE ||
       !repoRoot ||
-      !verifyFn({ repoRoot, row })
+      !verifyFn({
+        repoRoot,
+        row,
+        allowWarnings: row.warnings.length > 0,
+      })
     ) {
       output.write(`Kept, insufficient evidence: ${path}\n`);
       continue;
     }
-    const result = removeFn({ repoRoot, path: row.path });
+    const result = removeFn({
+      repoRoot,
+      path: row.path,
+      force: row.warnings.length > 0,
+    });
     if (result.status === 0) {
       output.write(`Deleted: ${row.path}\n`);
       removed += 1;
@@ -376,6 +385,11 @@ function createInteractiveController({
           );
         } else {
           printPreview(output, chosen);
+          if (chosen.some((row) => row.warnings.length > 0)) {
+            output.write(
+              "Warning: selected worktree(s) have local risk warnings. Forced removal will be used after confirmation.\n",
+            );
+          }
           output.write(
             `Type ${DELETE_CONFIRMATION} to confirm, or /cancel.\n`,
           );

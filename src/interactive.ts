@@ -70,6 +70,8 @@ const DASHBOARD_HEADER_LINE_COUNT = 3;
 const DASHBOARD_SCROLL_LINE_COUNT = 1;
 const DASHBOARD_FOOTER_LINE_COUNT = 5;
 const DASHBOARD_FOCUS_LINE_COUNT = 2;
+const DASHBOARD_FOCUS_WARNING_LINE_COUNT = 2;
+const DASHBOARD_FOCUS_BLOCKER_LINE_COUNT = 2;
 const DASHBOARD_ERROR_LINE_COUNT = 2;
 const DASHBOARD_PROMPT_LINE_COUNT = 2;
 const MIN_LIST_VIEWPORT_LINES = 1;
@@ -107,9 +109,9 @@ Keyboard:
   Enter                  Edit and run a command
   q                      Exit
 
-✅ marks selected SAFE rows; ⚠️ marks selected rows blocked from deletion.
-Only SAFE selections can be deleted. Deletion requires the exact DELETE
-confirmation and a second Git/process validation.
+✅ marks selected SAFE rows; ⚠️ marks rows with warnings or blocked evidence.
+Warnings are shown before forced removal. Deletion requires the exact DELETE
+confirmation and a second validation.
 `;
 
 const MAX_PREVIEW_ROWS = 20;
@@ -244,6 +246,28 @@ function statusLabel(row: AuditRow): string {
   return "UNKNOWN";
 }
 
+function rowWarnings(row: AuditRow): AuditRow["warnings"] {
+  return row.warnings ?? [];
+}
+
+function blockingReason(row: AuditRow): string | null {
+  const reasons: string[] = [];
+  if (row.decision === DECISIONS.KEEP_MAIN) {
+    reasons.push("main worktree is protected");
+  }
+  if (row.pr.kind === "UNKNOWN_GITHUB") {
+    reasons.push("GitHub PR evidence unavailable");
+  } else if (row.pr.kind !== "MERGED_EXACT") {
+    reasons.push(`PR evidence: ${compactPullRequest(row)}`);
+  }
+  if (row.chat.kind === "UNKNOWN_CHAT") {
+    reasons.push("Codex chat evidence unavailable");
+  } else if (row.chat.kind !== "EXACT") {
+    reasons.push(`Codex chat: ${compactChat(row)}`);
+  }
+  return reasons.length > 0 ? reasons.join(" · ") : null;
+}
+
 function compactSize(size: string): string {
   return size.replace(/\s*GiB$/u, "G");
 }
@@ -317,6 +341,7 @@ function formatRow(
 ): string {
   const cursor = row.path === cursorPath ? "▶" : " ";
   const isSelected = selected.has(row.path);
+  const hasWarnings = rowWarnings(row).length > 0;
   const isSafeSelected =
     row.decision === DECISIONS.REMOVE_CANDIDATE && selected.has(row.path);
   const selection = isSelected
@@ -326,7 +351,9 @@ function formatRow(
     : row.decision === DECISIONS.KEEP_MAIN
       ? SELECTION_MARKERS.main
       : row.decision === DECISIONS.REMOVE_CANDIDATE
-        ? SELECTION_MARKERS.safe
+        ? hasWarnings
+          ? SELECTION_MARKERS.selectedBlocked
+          : SELECTION_MARKERS.safe
         : SELECTION_MARKERS.blocked;
   const repositoryLabel = row.repository ?? row.repoRoot ?? "local";
   const repository = shortenText(repositoryLabel, repositoryWidth);
@@ -339,7 +366,7 @@ function formatRow(
   const rowText = `${cursor} ${selection} ${indexLabel} ${status} ${size} ${repository.padEnd(repositoryWidth)} ${path.padEnd(pathWidth)} ${evidence.padEnd(evidenceWidth)} ${activity}`;
   const visibleRow = rowText.slice(0, columns).trimEnd();
   if (!color || !isSelected) return visibleRow;
-  const ansiColor = isSafeSelected ? ANSI_GREEN : ANSI_YELLOW;
+  const ansiColor = isSafeSelected && !hasWarnings ? ANSI_GREEN : ANSI_YELLOW;
   return `${ansiColor}${ANSI_BOLD}${visibleRow}${ANSI_RESET}`;
 }
 
@@ -462,6 +489,9 @@ export function renderInteractive(
     selected.has(row.path),
   ).length;
   const safeSelectedCount = selectedRows(audit, selected).length;
+  const warningCount = audit.rows.filter(
+    (row) => rowWarnings(row).length > 0,
+  ).length;
   const variableColumns = width - ROW_FIXED_COLUMN_COUNT;
   const repositoryWidth = Math.max(
     MIN_REPOSITORY_COLUMN_WIDTH,
@@ -500,15 +530,30 @@ export function renderInteractive(
     DASHBOARD_SCROLL_LINE_COUNT +
     DASHBOARD_FOOTER_LINE_COUNT +
     (cursorRow ? DASHBOARD_FOCUS_LINE_COUNT : 0) +
+    (cursorRow && rowWarnings(cursorRow).length > 0
+      ? DASHBOARD_FOCUS_WARNING_LINE_COUNT
+      : 0) +
+    (cursorRow && blockingReason(cursorRow)
+      ? DASHBOARD_FOCUS_BLOCKER_LINE_COUNT
+      : 0) +
     (hasErrors ? DASHBOARD_ERROR_LINE_COUNT : 0) +
     (height ? DASHBOARD_PROMPT_LINE_COUNT : 0);
   const viewportLines = height
     ? Math.max(MIN_LIST_VIEWPORT_LINES, height - reservedLines)
     : entries.length;
   const viewport = viewportForEntries(entries, cursorPath, viewportLines);
+  const summary = [
+    `${audit.rows.length} worktrees`,
+    `${mainCount} main`,
+    `${safeCount} SAFE`,
+    `${warningCount} warn`,
+    `${selectedCount} selected`,
+    `${safeSelectedCount} SAFE`,
+    `filter=${filter}`,
+  ].join(" · ");
   const lines = [
     `Worktree Audit  ${shortenText(auditTitle(audit), width - 16)}`,
-    `${audit.rows.length} worktrees · ${mainCount} main · ${safeCount} safe · ${selectedCount} selected · ${safeSelectedCount} SAFE selected · filter=${filter}`,
+    summary,
     "",
   ];
   if (height) {
@@ -535,8 +580,8 @@ export function renderInteractive(
     "",
     "↑/↓ move · space select · enter command · /help · q quit",
     "Commands: /safe /preview /delete /refresh /quit",
-    "✅ SAFE selected · ⚠️ blocked selected · ○ SAFE available",
-    "🔒 BLOCKED · ◆ MAIN protected · Space toggles",
+    "✅ SAFE selected · ⚠️ warning or blocked · ○ SAFE available",
+    "🔒 evidence blocked · ◆ MAIN protected · Space toggles",
   );
   if (cursorRow) {
     lines.push(
@@ -546,6 +591,20 @@ export function renderInteractive(
         width,
       ),
     );
+    const warnings = rowWarnings(cursorRow);
+    if (warnings.length > 0) {
+      lines.push(
+        "",
+        shortenText(
+          `⚠️ Warnings: ${warnings.map((warning) => warning.message).join(" · ")}`,
+          width,
+        ),
+      );
+    }
+    const reason = blockingReason(cursorRow);
+    if (reason) {
+      lines.push("", shortenText(`🔒 Blocked: ${reason}`, width));
+    }
   }
   if ("errors" in audit && audit.errors.length > 0) {
     lines.push(
@@ -636,6 +695,12 @@ export function printPreview(output: CliOutput, rows: AuditRow[]): void {
     output.write(
       `- ${scope ? `[${scope}] ` : ""}${row.path} (${row.size}) · ${row.head}\n`,
     );
+    const warnings = rowWarnings(row);
+    if (warnings.length > 0) {
+      output.write(
+        `  ⚠️ ${warnings.map((warning) => warning.message).join(" · ")}\n`,
+      );
+    }
   });
   if (rows.length > MAX_PREVIEW_ROWS) {
     output.write(`- ... ${rows.length - MAX_PREVIEW_ROWS} more row(s)\n`);
