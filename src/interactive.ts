@@ -552,7 +552,7 @@ export function renderInteractive(
     `filter=${filter}`,
   ].join(" · ");
   const lines = [
-    `Worktree Audit  ${shortenText(auditTitle(audit), width - 16)}`,
+    `Worktree Cleaner  ${shortenText(auditTitle(audit), width - 19)}`,
     summary,
     "",
   ];

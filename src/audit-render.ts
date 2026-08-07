@@ -75,7 +75,7 @@ export function renderAudit(
     ? `workspace: ${audit.root}`
     : (audit.repository ?? "local Git repository");
   const lines = [
-    colorize(`\n💾 Worktree audit: ${title}`, "bold", color),
+    colorize(`\n💾 Worktree cleaner: ${title}`, "bold", color),
     auditSummary(audit.rows),
     "",
   ];

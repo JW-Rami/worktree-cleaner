@@ -164,7 +164,7 @@ export function createCodexChatLookup({
         method: "initialize",
         params: {
           clientInfo: {
-            name: "invisible-worktree-audit",
+            name: "worktree-cleaner",
             version: "0.1.0",
           },
         },

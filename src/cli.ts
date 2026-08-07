@@ -642,7 +642,7 @@ export async function runCli({
 }: RunCliOptions = {}): Promise<number> {
   const args = parseArgs(argv);
   if (args.help) {
-    output.write("Usage: worktree-audit [options]\n");
+    output.write("Usage: worktree-cleaner [options]\n");
     output.write(
       "Options: --all (-all) --interactive --json --cwd PATH --root PATH (--repos-dir) --max-depth N --concurrency N --merged-only --no-github --no-chat --deep-process-scan --version\n",
     );
@@ -691,7 +691,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     })
     .catch((error) => {
       console.error(
-        `worktree-audit: ${error instanceof Error ? error.message : String(error)}`,
+        `worktree-cleaner: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exitCode = 1;
     });

@@ -91,7 +91,7 @@ function pullRequest(overrides: Partial<PullRequest> = {}): PullRequest {
   };
 }
 
-describe("worktree-audit", () => {
+describe("worktree-cleaner", () => {
   it("parses registered worktrees without inferring a branch for detached HEADs", () => {
     const parsed = parseWorktreeList(`
 worktree /repo
@@ -141,7 +141,7 @@ detached
 
   it("discovers nested repositories and deduplicates linked worktrees", async () => {
     const root = realpathSync(
-      mkdtempSync(join(tmpdir(), "worktree-audit-discovery-")),
+        mkdtempSync(join(tmpdir(), "worktree-cleaner-discovery-")),
     );
     const repoA = join(root, "repo-a");
     const repoAWorktree = join(root, "repo-a-worktree");
@@ -442,7 +442,7 @@ detached
 
   it("audits repositories in parallel with bounded concurrency and stable ordering", async () => {
     const root = realpathSync(
-      mkdtempSync(join(tmpdir(), "worktree-audit-concurrency-")),
+      mkdtempSync(join(tmpdir(), "worktree-cleaner-concurrency-")),
     );
     const repoRoots = [
       join(root, "repo-a"),
@@ -517,7 +517,7 @@ detached
 
   it("parallelizes evidence searches inside a large repository", async () => {
     const root = realpathSync(
-      mkdtempSync(join(tmpdir(), "worktree-audit-worktree-concurrency-")),
+      mkdtempSync(join(tmpdir(), "worktree-cleaner-worktree-concurrency-")),
     );
     const worktreePaths = [
       join(root, "main"),
@@ -664,7 +664,7 @@ detached
       { selected: new Set([row.path]) },
     );
 
-    assert.match(output, /Worktree Audit/u);
+    assert.match(output, /Worktree Cleaner/u);
     assert.match(output, /↑\/↓ move/u);
     assert.match(output, /\/delete/u);
     assert.match(output, /✅\s+1\s+SAFE/u);
@@ -1164,7 +1164,7 @@ detached
 
   it("removes a dirty linked worktree through the real forced Git path", () => {
     const root = realpathSync(
-      mkdtempSync(join(tmpdir(), "worktree-audit-force-remove-")),
+      mkdtempSync(join(tmpdir(), "worktree-cleaner-force-remove-")),
     );
     const linked = join(root, "linked");
     const runGit = (args: string[]): void => {

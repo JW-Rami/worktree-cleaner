@@ -40,7 +40,7 @@ function runGit(cwd: string, args: string[]): void {
 }
 
 function createGitFixture(): GitFixture {
-  const tempRoot = mkdtempSync(join(tmpdir(), "worktree-audit-cli-e2e-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), "worktree-cleaner-cli-e2e-"));
   const root = join(tempRoot, "repo");
   mkdirSync(root);
 
