@@ -65,6 +65,17 @@ const mergedHead = "a".repeat(40);
 const staleHead = "b".repeat(40);
 const AUDIT_CONCURRENCY_TEST_DELAY_MS = 10;
 const WORKTREE_CONCURRENCY_TEST_DELAY_MS = 10;
+const INTERACTIVE_WAIT_TIMEOUT_MS = 2_000;
+
+async function waitForText(chunks: string[], pattern: RegExp): Promise<void> {
+  const deadline = Date.now() + INTERACTIVE_WAIT_TIMEOUT_MS;
+  while (!pattern.test(chunks.join(""))) {
+    if (Date.now() >= deadline) {
+      assert.match(chunks.join(""), pattern);
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
 
 function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
   return {
@@ -1144,6 +1155,70 @@ detached
     );
   });
 
+  it("shows deletion progress, accepts confirm, and clears the dashboard", async () => {
+    const row = buildAuditRow({
+      state: state({ path: "/tmp/deletable" }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const input = Object.assign(new EventEmitter(), {
+      isTTY: true,
+      setRawMode() {
+        return input;
+      },
+      pause() {
+        return input;
+      },
+      resume() {
+        return input;
+      },
+    });
+    const chunks: string[] = [];
+    const output = {
+      isTTY: true,
+      columns: 100,
+      rows: 16,
+      color: false,
+      write(chunk: string) {
+        chunks.push(chunk);
+        return true;
+      },
+    };
+    const session = runInteractiveSession({
+      audit: { repoRoot: "/repo", repository: null, rows: [row] },
+      args: { cwd: "/repo", cwdExplicit: true, noGithub: false, noChat: false },
+      input,
+      output,
+      errorOutput: output,
+      auditFn: async () => ({
+        repoRoot: "/repo",
+        repository: null,
+        rows: [row],
+      }),
+      verifyFn: () => true,
+      removeFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+
+    input.emit("data", " ");
+    await waitForText(chunks, /1 selected · 1 SAFE/u);
+    input.emit("data", "/delete\r");
+    await waitForText(chunks, /confirm> /u);
+    input.emit("data", "confirm\r");
+    await waitForText(chunks, /Status: ✅ Finished: 1 deleted · 0 kept · 0 failed/u);
+    input.emit("data", "q");
+
+    assert.equal(await session, 0);
+    const rendered = chunks.join("");
+    assert.match(rendered, /Revalidating 1 selected worktree/u);
+    assert.match(rendered, /\[1\/1\] Validating/u);
+    assert.match(rendered, /\[1\/1\] Removing/u);
+    assert.match(rendered, /Deleted .*deletable/u);
+    const finalFrame = rendered.split("\u001b[2J\u001b[H").at(-1) ?? "";
+    assert.match(finalFrame, /0 worktrees .*0 selected/u);
+    assert.match(finalFrame, /No rows for this filter/u);
+  });
+
   it("force-removes a warning candidate only after fresh explicit confirmation", async () => {
     const dirty = buildAuditRow({
       state: state({ dirtyCount: 1 }),
@@ -1179,6 +1254,7 @@ detached
     });
 
     assert.equal(result.removed, 1);
+    assert.equal(result.audit.rows.length, 0);
     assert.deepEqual(calls, [
       { action: "verify", allowWarnings: true },
       { action: "remove", force: true },
@@ -1227,6 +1303,7 @@ detached
     });
 
     assert.equal(result.removed, 1);
+    assert.equal(result.audit.rows.length, 0);
     assert.deepEqual(calls, [
       { repoRoot: "/repo", path: row.path, head: row.head },
       { repoRoot: "/repo", path: row.path, removed: true },

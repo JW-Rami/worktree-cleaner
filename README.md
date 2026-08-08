@@ -47,6 +47,10 @@ Enter     open the command prompt
 q         quit
 ```
 
+After `/delete`, type `DELETE` or `confirm`. The status line shows each audit,
+validation, and removal step. A successful deletion removes the row from the
+dashboard and clears the selection; cancelling also clears the selection.
+
 `◆ MAIN` is protected. `○ SAFE` is a deletion candidate. `⚠️` means the
 candidate has a local warning. `✅` means it is selected. `🔒` means required
 GitHub or Codex identity evidence is missing or ambiguous.

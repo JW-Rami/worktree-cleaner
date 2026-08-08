@@ -72,6 +72,7 @@ const MIN_PATH_COLUMN_WIDTH = 18;
 const ROW_FIXED_COLUMN_COUNT = 24;
 const MIN_TERMINAL_ROWS = 8;
 const DASHBOARD_HEADER_LINE_COUNT = 3;
+const DASHBOARD_STATUS_LINE_COUNT = 1;
 const DASHBOARD_SCROLL_LINE_COUNT = 1;
 const DASHBOARD_FOOTER_LINE_COUNT = 5;
 const DASHBOARD_FOCUS_LINE_COUNT = 2;
@@ -115,8 +116,8 @@ Keyboard:
   q                      Exit
 
 ✅ marks selected SAFE rows; ⚠️ marks rows with warnings or blocked evidence.
-Warnings are shown before forced removal. Deletion requires the exact DELETE
-confirmation and a second validation.
+Warnings are shown before forced removal. Deletion accepts DELETE or confirm,
+then performs a second validation.
 `;
 
 const MAX_PREVIEW_ROWS = 20;
@@ -493,6 +494,7 @@ export function renderInteractive(
     columns,
     rows: terminalRowValue,
     additionalLines = 0,
+    status = "",
     color = false,
   }: {
     selected?: Set<string>;
@@ -501,6 +503,7 @@ export function renderInteractive(
     columns?: number;
     rows?: number;
     additionalLines?: number;
+    status?: string;
     color?: boolean;
   } = {},
 ): string {
@@ -555,6 +558,7 @@ export function renderInteractive(
   const hasErrors = "errors" in audit && audit.errors.length > 0;
   const reservedLines =
     DASHBOARD_HEADER_LINE_COUNT +
+    (status ? DASHBOARD_STATUS_LINE_COUNT : 0) +
     DASHBOARD_SCROLL_LINE_COUNT +
     DASHBOARD_FOOTER_LINE_COUNT +
     (cursorRow ? DASHBOARD_FOCUS_LINE_COUNT : 0) +
@@ -583,6 +587,7 @@ export function renderInteractive(
   const lines = [
     `Worktree Cleaner  ${shortenText(auditTitle(audit), width - 19)}`,
     summary,
+    ...(status ? [shortenText(`Status: ${status}`, width)] : []),
     "",
   ];
   if (height) {

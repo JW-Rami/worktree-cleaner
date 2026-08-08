@@ -269,14 +269,9 @@ describe("CLI interaction E2E", () => {
 
         assert.equal(result.code, 0, result.output);
         const lastFrame = result.output.split("\u001b[2J\u001b[H").at(-1) ?? "";
-        const messageIndex = lastFrame.indexOf(
-          "No SAFE selection can be deleted",
-        );
-        const commandIndex = lastFrame.lastIndexOf("Commands:");
-        assert.ok(messageIndex > commandIndex, lastFrame);
         assert.match(
           lastFrame,
-          /No SAFE selection can be deleted\. Select a SAFE row\./u,
+          /Status: ⚠️ No SAFE selection can be deleted\. Select a SAFE row\./u,
         );
       } finally {
         rmSync(fixture.tempRoot, { recursive: true, force: true });

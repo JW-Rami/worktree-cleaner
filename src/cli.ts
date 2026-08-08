@@ -70,6 +70,7 @@ type RemoveFunction = (options: {
   force?: boolean;
 }) => CommandResult;
 type VerifyFunction = (options: RemovalTargetOptions) => boolean;
+type StatusHandler = (message: string) => void;
 
 interface SharedExecutionOptions {
   args: AuditArgs;
@@ -79,6 +80,7 @@ interface SharedExecutionOptions {
   rootAuditFn?: AuditRepositoriesFunction;
   removeFn?: RemoveFunction;
   verifyFn?: VerifyFunction;
+  onStatus?: StatusHandler;
 }
 
 interface DeletionOptions extends SharedExecutionOptions {
@@ -86,9 +88,34 @@ interface DeletionOptions extends SharedExecutionOptions {
   paths: Iterable<string>;
 }
 
+interface DeletionResult {
+  audit: Audit;
+  removed: number;
+  kept: number;
+  failed: number;
+}
+
+function withoutDeletedRows(audit: Audit, deletedPaths: Set<string>): Audit {
+  if ("repositories" in audit) {
+    return {
+      ...audit,
+      repositories: audit.repositories.map((repository) => ({
+        ...repository,
+        rows: repository.rows.filter((row) => !deletedPaths.has(row.path)),
+      })),
+      rows: audit.rows.filter((row) => !deletedPaths.has(row.path)),
+    };
+  }
+  return {
+    ...audit,
+    rows: audit.rows.filter((row) => !deletedPaths.has(row.path)),
+  };
+}
+
 interface InteractiveSessionOptions extends SharedExecutionOptions {
   audit: Audit;
   input?: CliInput;
+  onUpdate?: () => void;
 }
 
 interface RunCliOptions {
@@ -99,26 +126,47 @@ interface RunCliOptions {
 }
 
 const VERSION = "0.2.0";
+const CONFIRMATION_ALIASES = new Set([
+  "delete",
+  "confirm",
+]);
+const STATUS_PATH_MAX_LENGTH = 64;
 
-function progressWriter(errorOutput: CliOutput): (progress: ProgressEvent) => void {
+function statusPath(path: string): string {
+  if (path.length <= STATUS_PATH_MAX_LENGTH) return path;
+  return `…${path.slice(-(STATUS_PATH_MAX_LENGTH - 1))}`;
+}
+
+function confirmationAccepted(value: string): boolean {
+  return CONFIRMATION_ALIASES.has(value.replace(/^\/+/, "").toLowerCase());
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function progressWriter(
+  errorOutput: CliOutput,
+  onStatus?: StatusHandler,
+): (progress: ProgressEvent) => void {
+  const report =
+    onStatus ?? ((message: string) => errorOutput.write(`${message}\n`));
   return (progress: ProgressEvent): void => {
     const scope = progress.repositoryIndex
       ? `[${progress.repositoryIndex}/${progress.repositoryTotal}] ${progress.repositoryRoot} · `
       : "";
     if (progress.stage === "worktrees") {
-      errorOutput.write(
-        `🔎 ${scope}${progress.total} worktrees found. Analyzing...\n`,
+      report(
+        `🔎 ${scope}${progress.total} worktrees found. Analyzing...`,
       );
     } else if (progress.stage === "processes") {
-      errorOutput.write("⚙️ Scanning processes...\n");
+      report("⚙️ Scanning processes...");
     } else if (progress.stage === "sizes") {
-      errorOutput.write(
-        `📦 Measuring sizes: ${progress.completed}/${progress.total}\n`,
-      );
+      report(`📦 Measuring sizes: ${progress.completed}/${progress.total}`);
     } else if (progress.stage === "github") {
-      errorOutput.write("🔗 Checking GitHub PRs...\n");
+      report("🔗 Checking GitHub PRs...");
     } else if (progress.stage === "chats") {
-      errorOutput.write("💬 Matching Codex chats...\n");
+      report("💬 Matching Codex chats...");
     }
   };
 }
@@ -128,6 +176,7 @@ async function collectAudit(
   errorOutput: CliOutput,
   auditFn: AuditFunction = auditWorktrees,
   rootAuditFn: AuditRepositoriesFunction = auditRepositories,
+  onStatus?: StatusHandler,
 ): Promise<Audit> {
   const options: AuditWorktreeOptions = {
     cwd: args.cwd,
@@ -135,7 +184,7 @@ async function collectAudit(
     noChat: args.noChat ?? false,
     deepProcessScan: args.deepProcessScan ?? false,
     worktreeConcurrency: args.concurrency,
-    onProgress: progressWriter(errorOutput),
+    onProgress: progressWriter(errorOutput, onStatus),
   };
   const root = args.root ?? (
     args.cwdExplicit && !args.all ? null : defaultWorkspaceRoot(args.cwd)
@@ -159,45 +208,85 @@ export async function executeDeletion({
   rootAuditFn = auditRepositories,
   removeFn = removeWorktree,
   verifyFn = verifyRemovalTarget,
-}: DeletionOptions): Promise<{ audit: Audit; removed: number }> {
+  onStatus,
+}: DeletionOptions): Promise<DeletionResult> {
+  const targetPaths = [...paths];
+  const report = (message: string): void => {
+    output.write(`${message}\n`);
+    onStatus?.(message);
+  };
+  onStatus?.(`⏳ Revalidating ${targetPaths.length} selected worktree(s)...`);
   const latestAudit = await collectAudit(
     { ...args, deepProcessScan: true },
     errorOutput,
     auditFn,
     rootAuditFn,
+    onStatus,
   );
   const latestRows = new Map(latestAudit.rows.map((row) => [row.path, row]));
   let removed = 0;
-  for (const path of paths) {
+  let kept = 0;
+  let failed = 0;
+  const deletedPaths = new Set<string>();
+  for (const [index, path] of targetPaths.entries()) {
+    const progress = `[${index + 1}/${targetPaths.length}]`;
+    onStatus?.(`🔍 ${progress} Validating ${statusPath(path)}...`);
     const row = latestRows.get(path);
     const repoRoot =
       row?.repoRoot ?? ("repoRoot" in audit ? audit.repoRoot : undefined);
+    if (!row) {
+      report(`⚠️ ${progress} Kept ${statusPath(path)}: no longer found`);
+      kept += 1;
+      continue;
+    }
+    if (row.decision !== DECISIONS.REMOVE_CANDIDATE) {
+      report(
+        `⚠️ ${progress} Kept ${statusPath(path)}: latest status is ${row.decision}`,
+      );
+      kept += 1;
+      continue;
+    }
+    if (!repoRoot) {
+      report(`⚠️ ${progress} Kept ${statusPath(path)}: repository is unknown`);
+      kept += 1;
+      continue;
+    }
     if (
-      !row ||
-      row.decision !== DECISIONS.REMOVE_CANDIDATE ||
-      !repoRoot ||
       !verifyFn({
         repoRoot,
         row,
         allowWarnings: row.warnings.length > 0,
       })
     ) {
-      output.write(`Kept, insufficient evidence: ${path}\n`);
+      report(`⚠️ ${progress} Kept ${statusPath(path)}: validation failed`);
+      kept += 1;
       continue;
     }
+    onStatus?.(`🗑️ ${progress} Removing ${statusPath(path)}...`);
     const result = removeFn({
       repoRoot,
       path: row.path,
       force: row.warnings.length > 0,
     });
     if (result.status === 0) {
-      output.write(`Deleted: ${row.path}\n`);
+      report(`✅ ${progress} Deleted ${statusPath(row.path)}`);
+      deletedPaths.add(row.path);
       removed += 1;
     } else {
-      output.write(`Deletion failed: ${row.path}\n`);
+      const detail = result.stderr.trim() || `exit status ${result.status}`;
+      report(`❌ ${progress} Failed ${statusPath(row.path)}: ${detail}`);
+      failed += 1;
     }
   }
-  return { audit: latestAudit, removed };
+  const summary =
+    `✅ Deletion finished: ${removed} deleted · ${kept} kept · ${failed} failed`;
+  report(summary);
+  return {
+    audit: withoutDeletedRows(latestAudit, deletedPaths),
+    removed,
+    kept,
+    failed,
+  };
 }
 
 interface RawCliInput extends CliInput {
@@ -223,6 +312,8 @@ interface InteractiveController {
     selected: Set<string>;
     cursorPath: string | null;
     pendingDeletion: Set<string> | null;
+    status: string;
+    busy: boolean;
   };
   move(direction: "up" | "down"): void;
   toggleSelection(): void;
@@ -238,6 +329,7 @@ function createInteractiveController({
   rootAuditFn,
   removeFn,
   verifyFn,
+  onUpdate,
 }: InteractiveSessionOptions): InteractiveController {
   let currentAudit = audit;
   let filter: Filter = DEFAULT_FILTER;
@@ -245,7 +337,17 @@ function createInteractiveController({
   let cursorPath: string | null =
     navigationRows(currentAudit, filter)[0]?.path ?? null;
   let pendingDeletion: Set<string> | null = null;
+  let status = "";
+  let busy = false;
   let closed = false;
+
+  const notify = (): void => {
+    onUpdate?.();
+  };
+  const setStatus = (message: string): void => {
+    status = message;
+    notify();
+  };
 
   const normalizeCursor = (): void => {
     const rows = navigationRows(currentAudit, filter);
@@ -260,6 +362,8 @@ function createInteractiveController({
       selected,
       cursorPath,
       pendingDeletion,
+      status,
+      busy,
     }),
     move(direction) {
       cursorPath = moveCursor(currentAudit, filter, cursorPath, direction);
@@ -269,47 +373,70 @@ function createInteractiveController({
         (candidate) => candidate.path === cursorPath,
       );
       if (!row) {
-        output.write("No worktree is focused.\n");
+        setStatus("⚠️ No worktree is focused.");
       } else if (selected.has(row.path)) {
         selected.delete(row.path);
+        setStatus(`↩️ Unselected ${statusPath(row.path)}`);
       } else {
         selected.add(row.path);
+        setStatus(`✅ Selected ${statusPath(row.path)}`);
       }
     },
     async submit(value) {
       const line = String(value ?? "").trim();
       if (pendingDeletion) {
-        if (line === DELETE_CONFIRMATION) {
-          const result = await executeDeletion({
-            audit: currentAudit,
-            paths: pendingDeletion,
-            args,
-            output,
-            errorOutput,
-            auditFn,
-            rootAuditFn,
-            removeFn,
-            verifyFn,
-          });
-          currentAudit = result.audit;
-          selected = new Set();
+        if (confirmationAccepted(line)) {
+          const pathsToDelete = [...pendingDeletion];
           pendingDeletion = null;
-          normalizeCursor();
-          output.write(`\n${result.removed} worktree(s) deleted.\n`);
+          selected = new Set();
+          busy = true;
+          setStatus(
+            `⏳ Starting deletion of ${pathsToDelete.length} worktree(s)...`,
+          );
+          try {
+            const result = await executeDeletion({
+              audit: currentAudit,
+              paths: pathsToDelete,
+              args,
+              output,
+              errorOutput,
+              auditFn,
+              rootAuditFn,
+              removeFn,
+              verifyFn,
+              onStatus: setStatus,
+            });
+            currentAudit = result.audit;
+            normalizeCursor();
+            setStatus(
+              `✅ Finished: ${result.removed} deleted · ${result.kept} kept · ${result.failed} failed`,
+            );
+          } catch (error) {
+            setStatus(`❌ Deletion failed: ${errorMessage(error)}`);
+            throw error;
+          } finally {
+            busy = false;
+            notify();
+          }
         } else if (["/cancel", "cancel"].includes(line.toLowerCase())) {
           pendingDeletion = null;
-          output.write("Deletion cancelled.\n");
+          selected = new Set();
+          setStatus("↩️ Deletion cancelled. Selection cleared.");
         } else if (
           ["/q", "/quit", "/exit", "q", "quit", "exit"].includes(
             line.toLowerCase(),
           )
         ) {
           pendingDeletion = null;
+          selected = new Set();
           closed = true;
           return { closed: true, render: false };
         } else {
           pendingDeletion = null;
-          output.write("Deletion cancelled: exact confirmation required.\n");
+          selected = new Set();
+          setStatus(
+            "⚠️ Deletion cancelled: type DELETE or confirm next time. Selection cleared.",
+          );
         }
         return { closed, render: true };
       }
@@ -327,12 +454,13 @@ function createInteractiveController({
       } else if (parsed.command === "filter") {
         const nextFilter = parsed.argument || DEFAULT_FILTER;
         if (!isFilter(nextFilter)) {
-          output.write(
-            `Unknown filter: ${nextFilter}. Values: ${[...FILTERS].join(", ")}\n`,
+          setStatus(
+            `❌ Unknown filter: ${nextFilter}. Values: ${[...FILTERS].join(", ")}`,
           );
         } else {
           filter = nextFilter;
           normalizeCursor();
+          setStatus(`🔎 Filter: ${filter}`);
         }
       } else if (parsed.command === "safe") {
         selected = new Set(
@@ -340,11 +468,13 @@ function createInteractiveController({
         );
         filter = SAFE_FILTER;
         normalizeCursor();
+        setStatus(`✅ Selected ${selected.size} SAFE worktree(s).`);
       } else if (
         ["clear", "unselect"].includes(parsed.command) &&
         !parsed.argument
       ) {
         selected = new Set();
+        setStatus("↩️ Selection cleared.");
       } else if (["select", "unselect"].includes(parsed.command)) {
         const rows = navigationRows(currentAudit, filter);
         const selection = parseSelection(
@@ -367,21 +497,22 @@ function createInteractiveController({
       } else if (parsed.command === "preview") {
         const chosen = selectedRows(currentAudit, selected);
         if (chosen.length === 0) {
-          output.write(
+          setStatus(
             selected.size > 0
-              ? "No SAFE selection can be deleted.\n"
-              : "No deletion selected.\n",
+              ? "⚠️ No SAFE selection can be deleted."
+              : "ℹ️ No deletion selected.",
           );
         } else {
           printPreview(output, chosen);
+          setStatus(`👀 Preview ready: ${chosen.length} SAFE worktree(s).`);
         }
       } else if (parsed.command === "delete") {
         const chosen = selectedRows(currentAudit, selected);
         if (chosen.length === 0) {
-          output.write(
+          setStatus(
             selected.size > 0
-              ? "No SAFE selection can be deleted. Select a SAFE row.\n"
-              : "No deletion selected. Use /safe or /select.\n",
+              ? "⚠️ No SAFE selection can be deleted. Select a SAFE row."
+              : "ℹ️ No deletion selected. Use /safe or /select.",
           );
         } else {
           printPreview(output, chosen);
@@ -391,22 +522,38 @@ function createInteractiveController({
             );
           }
           output.write(
-            `Type ${DELETE_CONFIRMATION} to confirm, or /cancel.\n`,
+            `Type ${DELETE_CONFIRMATION} or confirm to continue, or /cancel.\n`,
           );
           pendingDeletion = new Set(chosen.map((row) => row.path));
+          setStatus(
+            `⚠️ Confirmation required: ${chosen.length} worktree(s) queued for deletion.`,
+          );
         }
       } else if (parsed.command === "cancel") {
-        output.write("No deletion is pending.\n");
+        setStatus("ℹ️ No deletion is pending.");
       } else if (parsed.command === "refresh") {
-        currentAudit = await collectAudit(
-          args,
-          errorOutput,
-          auditFn,
-          rootAuditFn,
-        );
-        selected = new Set();
-        normalizeCursor();
-        output.write("Audit refreshed.\n");
+        busy = true;
+        setStatus("⏳ Refreshing the audit...");
+        try {
+          currentAudit = await collectAudit(
+            args,
+            errorOutput,
+            auditFn,
+            rootAuditFn,
+            setStatus,
+          );
+          selected = new Set();
+          normalizeCursor();
+          setStatus(
+            `✅ Audit refreshed: ${currentAudit.rows.length} worktree(s).`,
+          );
+        } catch (error) {
+          setStatus(`❌ Refresh failed: ${errorMessage(error)}`);
+          throw error;
+        } finally {
+          busy = false;
+          notify();
+        }
       } else if (parsed.command === "json") {
         output.write(`${JSON.stringify(currentAudit, null, 2)}\n`);
       } else if (parsed.command === "plain") {
@@ -443,6 +590,7 @@ function renderSession(
     selected: state.selected,
     filter: state.filter,
     cursorPath: state.cursorPath,
+    status: state.status,
     columns: output.columns,
     rows: output.rows ?? (output.isTTY ? DEFAULT_TERMINAL_ROWS : undefined),
     additionalLines,
@@ -456,11 +604,16 @@ async function runLineInteractiveSession(
   options: InteractiveSessionOptions,
 ): Promise<number> {
   const { input = process.stdin, output = process.stdout } = options;
-  const controller = createInteractiveController(options);
+  let requestRender = (): void => {};
+  const controller = createInteractiveController({
+    ...options,
+    onUpdate: () => requestRender(),
+  });
   let closed = false;
   const show = (): void => {
     output.write(`${renderSession(controller, output)}\n`);
   };
+  requestRender = show;
   const finish = (): void => {
     if (closed) return;
     closed = true;
@@ -491,9 +644,7 @@ async function runLineInteractiveSession(
         }
         if (result.render) show();
       } catch (error) {
-        output.write(
-          `Error: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
+        output.write(`Error: ${errorMessage(error)}\n`);
       } finally {
         if (!closed) {
           readline.resume();
@@ -523,10 +674,12 @@ async function runRawInteractiveSession(
       return true;
     },
   };
+  let requestRender = (): void => {};
   const controller = createInteractiveController({
     ...options,
     output: messageOutput,
     errorOutput: messageOutput,
+    onUpdate: () => requestRender(),
   });
   let pendingEscape = "";
   let commandBuffer = "";
@@ -536,7 +689,11 @@ async function runRawInteractiveSession(
 
   const render = (): void => {
     const state = controller.getState();
-    const prompt = state.pendingDeletion ? "confirm> " : PROMPT;
+    const prompt = state.busy
+      ? "working> "
+      : state.pendingDeletion
+        ? "confirm> "
+        : PROMPT;
     const message = lastMessage.trimEnd();
     const messageLines = message.length > 0 ? message.split(/\r?\n/u).length : 0;
     const messageBlock = message.length > 0 ? `\n${message}` : "";
@@ -544,6 +701,7 @@ async function runRawInteractiveSession(
       `${ANSI_CLEAR_SCREEN}${ANSI_HIDE_CURSOR}${renderSession(controller, output, messageLines)}${messageBlock}\n\n${prompt}${commandBuffer}`,
     );
   };
+  requestRender = render;
   const finish = (): void => {
     if (closed) return;
     closed = true;
@@ -571,6 +729,7 @@ async function runRawInteractiveSession(
   };
   const handleKey = async (key: TerminalKey): Promise<void> => {
     if (closed) return;
+    if (controller.getState().busy) return;
     if (key.kind === "interrupt") {
       finish();
     } else if (key.kind === "up" || key.kind === "down") {
