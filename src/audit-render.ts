@@ -43,6 +43,27 @@ function chatLabel(row: AuditRow): string {
   return chat ? `${chat.title} [${chat.status}]` : `chat ${row.chat.kind}`;
 }
 
+function branchLabel(row: AuditRow): string {
+  return row.branch ?? (row.detached ? "detached" : "unknown");
+}
+
+function evidenceLabel(row: AuditRow): string {
+  const evidence: string[] = [];
+  if (row.pr.pullRequest) evidence.push(pullRequestLabel(row));
+  if (row.chat.threads.length > 0) evidence.push(chatLabel(row));
+  if (!row.pr.pullRequest || row.chat.threads.length === 0) {
+    evidence.push(`branch ${branchLabel(row)}`);
+  }
+  return evidence.join(" · ") || `branch ${branchLabel(row)}`;
+}
+
+function activityLabel(row: AuditRow): string {
+  if (!row.activity || row.activity.source === "unknown") {
+    return "activity unknown";
+  }
+  return `${row.activity.source} ${row.activity.timestamp}`;
+}
+
 function auditSummary(rows: AuditRow[]): string {
   const counts = rows.reduce<Record<string, number>>((summary, row) => {
     const label = decisionLabel(row.decision);
@@ -64,7 +85,7 @@ function compactAuditLine(row: AuditRow): string {
   const warningLabel = (row.warnings ?? []).length > 0
     ? ` · ⚠️ ${(row.warnings ?? []).map((warning) => warning.message).join(" · ")}`
     : "";
-  return `${row.marker} ${row.size.padStart(9)} ${decisionLabel(row.decision).padEnd(7)} ${scope}${shortenText(row.path, MAX_PATH_DISPLAY_LENGTH)} · ${shortenText(pullRequestLabel(row), 22)} · 💬 ${shortenText(chatLabel(row), 28)} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}${warningLabel}`;
+  return `${row.marker} ${row.size.padStart(9)} ${decisionLabel(row.decision).padEnd(7)} ${scope}${shortenText(row.path, MAX_PATH_DISPLAY_LENGTH)} · ${shortenText(evidenceLabel(row), 40)} · ${shortenText(activityLabel(row), 28)} · dirty=${row.dirtyCount ?? "?"} open=${row.openProcessCount ?? "?"}${warningLabel}`;
 }
 
 export function renderAudit(

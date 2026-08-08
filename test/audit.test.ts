@@ -7,6 +7,7 @@ import {
   mkdirSync,
   realpathSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { describe, it } from "node:test";
@@ -18,6 +19,7 @@ import {
   auditRepositories,
   auditWorktrees,
   buildAuditRow,
+  collectWorktreeState,
   createCodexChatLookup,
   defaultSelection,
   DEFAULT_DISCOVERY_MAX_DEPTH,
@@ -78,6 +80,7 @@ function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
     lastCommit: { date: "2026-07-20T10:00:00Z", subject: "feature" },
     openProcessCount: 0,
     ...overrides,
+    lastFileModifiedAt: overrides.lastFileModifiedAt ?? null,
   };
 }
 
@@ -340,6 +343,118 @@ detached
 
     assert.equal(row.decision, "REMOVE_CANDIDATE");
     assert.deepEqual(row.warnings, []);
+  });
+
+  it("uses the latest chat update and falls back to file mtime", () => {
+    const chatRow = buildAuditRow({
+      state: state({ lastFileModifiedAt: "2026-08-07T18:00:00Z" }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: {
+        kind: "EXACT",
+        threads: [
+          {
+            id: "chat-old",
+            title: "Old",
+            status: "idle",
+            updatedAt: "2026-08-07T17:00:00Z",
+          },
+          {
+            id: "chat-new",
+            title: "New",
+            status: "idle",
+            updatedAt: "2026-08-07T19:00:00Z",
+          },
+        ],
+      },
+      mainPath: "/repo",
+    });
+    assert.deepEqual(chatRow.activity, {
+      source: "chat",
+      timestamp: "2026-08-07T19:00:00.000Z",
+    });
+
+    const fileRow = buildAuditRow({
+      state: state({ lastFileModifiedAt: "2026-08-07T18:00:00Z" }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "NO_CHAT", threads: [] },
+      mainPath: "/repo",
+    });
+    assert.deepEqual(fileRow.activity, {
+      source: "file",
+      timestamp: "2026-08-07T18:00:00.000Z",
+    });
+  });
+
+  it("looks up chats for worktrees without GitHub PR evidence", async () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "worktree-cleaner-chat-scope-")),
+    );
+    const linked = join(root, "linked");
+    const runGit = (args: string[]): void => {
+      execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    };
+
+    try {
+      writeFileSync(join(root, "README.md"), "fixture\n");
+      runGit(["init", "--quiet"]);
+      runGit(["config", "user.email", "cli-e2e@example.invalid"]);
+      runGit(["config", "user.name", "CLI E2E"]);
+      runGit(["config", "commit.gpgSign", "false"]);
+      runGit(["add", "README.md"]);
+      runGit(["commit", "--quiet", "-m", "fixture"]);
+      runGit(["worktree", "add", "--quiet", "-b", "linked", linked]);
+
+      const queriedPaths: string[] = [];
+      await auditWorktrees({
+        cwd: root,
+        noGithub: true,
+        chatLookup: async (cwd) => {
+          queriedPaths.push(cwd);
+          return { kind: "NO_CHAT", threads: [] };
+        },
+      });
+
+      assert.deepEqual(queriedPaths.sort(), [root, linked].sort());
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("finds the latest tracked or non-ignored file modification", () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "worktree-cleaner-file-mtime-")),
+    );
+    const older = join(root, "older.txt");
+    const newer = join(root, "newer.txt");
+    const ignored = join(root, "ignored.log");
+    const runGit = (args: string[]): void => {
+      execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    };
+    const olderTime = new Date("2026-08-07T17:00:00Z");
+    const newerTime = new Date("2026-08-07T19:00:00Z");
+
+    try {
+      writeFileSync(older, "older\n");
+      writeFileSync(newer, "newer\n");
+      writeFileSync(join(root, ".gitignore"), "*.log\n");
+      writeFileSync(ignored, "ignored\n");
+      runGit(["init", "--quiet"]);
+      runGit(["config", "user.email", "cli-e2e@example.invalid"]);
+      runGit(["config", "user.name", "CLI E2E"]);
+      runGit(["config", "commit.gpgSign", "false"]);
+      runGit(["add", "."]);
+      runGit(["commit", "--quiet", "-m", "fixture"]);
+      utimesSync(older, olderTime, olderTime);
+      utimesSync(newer, newerTime, newerTime);
+      utimesSync(join(root, ".gitignore"), olderTime, olderTime);
+      utimesSync(ignored, new Date("2026-08-08T00:00:00Z"), new Date("2026-08-08T00:00:00Z"));
+
+      const stateResult = collectWorktreeState({ path: root, head: "" });
+
+      assert.equal(stateResult.lastFileModifiedAt, newerTime.toISOString());
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("reports unavailable local checks as warnings", () => {
@@ -757,8 +872,28 @@ detached
       { cursorPath: row.path },
     );
 
-    assert.match(output, /#42 mer.*nochat/u);
+    assert.match(output, /branch=rami\/feature-a/u);
     assert.doesNotMatch(output, /Blocked: Codex chat: nochat/u);
+  });
+
+  it("shows the branch when PR and chat identity are unavailable", () => {
+    const row = buildAuditRow({
+      state: state({
+        branch: "rami/no-pr-no-chat",
+        lastFileModifiedAt: "2026-08-07T18:00:00Z",
+      }),
+      pr: { kind: "NO_PR", pullRequest: null },
+      chat: { kind: "NO_CHAT", threads: [] },
+      mainPath: "/repo",
+    });
+    const output = renderInteractive(
+      { repoRoot: "/repo", repository: null, rows: [row] },
+      { columns: 120, cursorPath: row.path },
+    );
+
+    assert.match(output, /branch:ra…r-no-chat/u);
+    assert.match(output, /F 08-07 18:00Z/u);
+    assert.match(output, /Activity: file 2026-08-07T18:00:00\.000Z/u);
   });
 
   it("separates primary worktrees and shortens rows to the terminal width", () => {

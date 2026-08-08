@@ -14,6 +14,11 @@ import { dirname, join } from "node:path";
 const LINKED_BRANCH = "e2e-linked";
 const KEY_DELAY_MS = 100;
 const PTY_TIMEOUT_MS = 15_000;
+const PTY_ACTIONS = Object.freeze({
+  SELECT_AND_QUIT: "select-and-quit",
+  SELECT_AND_DELETE: "select-and-delete",
+} as const);
+type PtyAction = (typeof PTY_ACTIONS)[keyof typeof PTY_ACTIONS];
 const REPOSITORY_ROOT = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -76,7 +81,8 @@ import signal
 import sys
 import time
 
-command = sys.argv[1:]
+action = sys.argv[1]
+command = sys.argv[2:]
 if not command:
     raise SystemExit("missing command")
 
@@ -87,6 +93,7 @@ if child_pid == 0:
 deadline = time.monotonic() + ${PTY_TIMEOUT_MS / 1000}
 buffer = bytearray()
 sent_keys = False
+sent_exit = False
 child_status = None
 
 try:
@@ -114,7 +121,23 @@ try:
                 time.sleep(${KEY_DELAY_MS / 1000})
                 os.write(master_fd, b" ")
                 time.sleep(${KEY_DELAY_MS / 1000})
+                if action == "${PTY_ACTIONS.SELECT_AND_DELETE}":
+                    os.write(master_fd, b"/delete\r")
+                else:
+                    os.write(master_fd, b"q")
+                    sent_exit = True
+
+            if (
+                action == "${PTY_ACTIONS.SELECT_AND_DELETE}"
+                and sent_keys
+                and not sent_exit
+                and (
+                    b"No SAFE selection can be deleted" in buffer
+                    or b"Deletion preview" in buffer
+                )
+            ):
                 os.write(master_fd, b"q")
+                sent_exit = True
 
         if child_status is None:
             waited_pid, child_status = os.waitpid(child_pid, os.WNOHANG)
@@ -134,10 +157,11 @@ if os.WIFSIGNALED(child_status):
 raise SystemExit(1)
 `;
 
-function ptyArguments(fixtureRoot: string): string[] {
+function ptyArguments(fixtureRoot: string, action: string): string[] {
   return [
     "-c",
     PYTHON_PTY_RUNNER,
+    action,
     process.execPath,
     CLI_ENTRYPOINT,
     "--cwd",
@@ -147,9 +171,12 @@ function ptyArguments(fixtureRoot: string): string[] {
   ];
 }
 
-function runCliInPty(fixtureRoot: string): Promise<PtyResult> {
+function runCliInPty(
+  fixtureRoot: string,
+  action: PtyAction = PTY_ACTIONS.SELECT_AND_QUIT,
+): Promise<PtyResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn("python3", ptyArguments(fixtureRoot), {
+    const child = spawn("python3", ptyArguments(fixtureRoot, action), {
       cwd: REPOSITORY_ROOT,
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["pipe", "pipe", "pipe"],
@@ -216,6 +243,41 @@ describe("CLI interaction E2E", () => {
           /Blocked: GitHub PR evidence unavailable/u,
         );
         assert.match(result.output, /Session ended\./u);
+      } finally {
+        rmSync(fixture.tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "keeps the delete refusal visible after Enter",
+    {
+      skip:
+        process.platform === "win32"
+          ? "A POSIX PTY and Python 3 are required for this test."
+          : false,
+      timeout: PTY_TIMEOUT_MS,
+    },
+    async () => {
+      const fixture = createGitFixture();
+
+      try {
+        const result = await runCliInPty(
+          fixture.repositoryRoot,
+          PTY_ACTIONS.SELECT_AND_DELETE,
+        );
+
+        assert.equal(result.code, 0, result.output);
+        const lastFrame = result.output.split("\u001b[2J\u001b[H").at(-1) ?? "";
+        const messageIndex = lastFrame.indexOf(
+          "No SAFE selection can be deleted",
+        );
+        const commandIndex = lastFrame.lastIndexOf("Commands:");
+        assert.ok(messageIndex > commandIndex, lastFrame);
+        assert.match(
+          lastFrame,
+          /No SAFE selection can be deleted\. Select a SAFE row\./u,
+        );
       } finally {
         rmSync(fixture.tempRoot, { recursive: true, force: true });
       }

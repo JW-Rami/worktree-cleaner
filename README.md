@@ -51,6 +51,13 @@ q         quit
 candidate has a local warning. `✅` means it is selected. `🔒` means required
 GitHub or Codex identity evidence is missing or ambiguous.
 
+Each row shows the latest known Codex chat update. When no chat timestamp is
+available, it falls back to the newest modification time among tracked and
+non-ignored files. If neither a PR nor a chat is found, the branch name is
+shown instead. File timestamps can still reflect tools that rewrite tracked
+files continuously. In the compact dashboard, `C` means chat and `F` means
+file; the focused row shows the full timestamp.
+
 Local warnings include uncommitted changes, open processes, unclassified
 ignored files, unavailable local scans, and an active Codex chat. They are
 shown clearly but do not make an otherwise verified candidate undeletable.

@@ -44,6 +44,7 @@ import {
 } from "./github.js";
 import { buildAuditRow } from "./policy.js";
 import {
+  collectWorktreeState,
   collectWorktreeStateAsync,
   measureWorktreeSizesAsync,
   processCountForPath,
@@ -70,6 +71,7 @@ export type {
   AuditRepositoriesOptions,
   AuditRepositoryFunction,
   AuditRow,
+  ActivityEvidence,
   AuditWorktreeOptions,
   ChatEvidence,
   ChatKind,
@@ -110,6 +112,7 @@ export {
 export { buildAuditRow } from "./policy.js";
 export {
   defaultSelection,
+  collectWorktreeState,
   collectWorktreeStateAsync,
   measureWorktreeSizes,
   measureWorktreeSizesAsync,
@@ -148,6 +151,7 @@ function missingWorktreeState(worktree: Worktree): WorktreeState {
     ignoredUnknownCount: null,
     sizeKib: null,
     lastCommit: { date: "", subject: "" },
+    lastFileModifiedAt: null,
     openProcessCount: null,
   };
 }
@@ -197,17 +201,7 @@ async function prepareAuditContext({
     : loadPullRequests(repository, runCommand);
 
   onProgress({ stage: PROGRESS_STAGES.CHATS });
-  const chatWorktrees =
-    pullRequests === null
-      ? []
-      : worktrees.filter(
-          (worktree) =>
-            matchPullRequest({
-              branch: worktree.branch ?? null,
-              head: worktree.head ?? "",
-              pullRequests,
-            }).kind === "MERGED_EXACT",
-        );
+  const chatWorktrees = noChat ? [] : worktrees;
   let chatResults: ChatEvidence[];
   try {
     chatResults = await mapWithConcurrency(

@@ -83,6 +83,7 @@ export interface WorktreeState extends Worktree {
   ignoredUnknownCount: number | null;
   sizeKib: number | null;
   lastCommit: LastCommit;
+  lastFileModifiedAt: string | null;
   openProcessCount: number | null;
 }
 
@@ -140,6 +141,11 @@ export interface ChatEvidence {
   threads: ChatThread[];
 }
 
+export type ActivityEvidence =
+  | { source: "chat"; timestamp: string }
+  | { source: "file"; timestamp: string }
+  | { source: "unknown" };
+
 export const WARNING_CODES = Object.freeze({
   DIRTY_WORKTREE: "DIRTY_WORKTREE",
   DIRTY_STATUS_UNAVAILABLE: "DIRTY_STATUS_UNAVAILABLE",
@@ -161,6 +167,7 @@ export interface AuditWarning {
 export interface AuditRow extends WorktreeState {
   pr: PullRequestEvidence;
   chat: ChatEvidence;
+  activity: ActivityEvidence;
   decision: Decision;
   marker: string;
   size: string;

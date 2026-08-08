@@ -1,4 +1,9 @@
-import { DECISIONS, type Audit, type AuditRow } from "./domain.js";
+import {
+  DECISIONS,
+  type ActivityEvidence,
+  type Audit,
+  type AuditRow,
+} from "./domain.js";
 
 export interface CliOutput {
   isTTY?: boolean;
@@ -294,17 +299,40 @@ function compactChat(row: AuditRow): string {
   return "chat?";
 }
 
+function branchLabel(row: AuditRow): string {
+  return row.branch ?? (row.detached ? "detached" : "unknown");
+}
+
+function compactTimestamp(timestamp: string): string {
+  const normalized = new Date(timestamp);
+  if (Number.isNaN(normalized.valueOf())) return "?";
+  const iso = normalized.toISOString();
+  return `${iso.slice(5, 10)} ${iso.slice(11, 16)}Z`;
+}
+
+function activityLabel(activity: ActivityEvidence | undefined): string {
+  if (!activity || activity.source === "unknown") return "activity ?";
+  const source = activity.source === "chat" ? "C" : "F";
+  return `${source} ${compactTimestamp(activity.timestamp)}`;
+}
+
+function fullActivityLabel(activity: ActivityEvidence | undefined): string {
+  if (!activity || activity.source === "unknown") return "unknown";
+  return `${activity.source} ${activity.timestamp}`;
+}
+
 function compactEvidence(row: AuditRow): string {
-  const pullRequest = compactPullRequest(row);
-  return row.chat.kind === "EXACT" && row.chat.threads.length === 0
-    ? pullRequest
-    : `${pullRequest}·${compactChat(row)}`;
+  const evidence: string[] = [];
+  if (row.pr.pullRequest) evidence.push(compactPullRequest(row));
+  if (row.chat.threads.length > 0) evidence.push(compactChat(row));
+  if (!row.pr.pullRequest || row.chat.threads.length === 0) {
+    evidence.push(`branch:${shortenText(branchLabel(row), 18)}`);
+  }
+  return evidence.join("·") || "branch:unknown";
 }
 
 function compactActivity(row: AuditRow): string {
-  const dirty = `d=${row.dirtyCount ?? "?"}`;
-  const open = `o=${row.openProcessCount ?? "?"}`;
-  return `${dirty} ${open}`;
+  return activityLabel(row.activity);
 }
 
 interface RowFormatOptions {
@@ -464,6 +492,7 @@ export function renderInteractive(
     cursorPath = null,
     columns,
     rows: terminalRowValue,
+    additionalLines = 0,
     color = false,
   }: {
     selected?: Set<string>;
@@ -471,6 +500,7 @@ export function renderInteractive(
     cursorPath?: string | null;
     columns?: number;
     rows?: number;
+    additionalLines?: number;
     color?: boolean;
   } = {},
 ): string {
@@ -535,7 +565,8 @@ export function renderInteractive(
       ? DASHBOARD_FOCUS_BLOCKER_LINE_COUNT
       : 0) +
     (hasErrors ? DASHBOARD_ERROR_LINE_COUNT : 0) +
-    (height ? DASHBOARD_PROMPT_LINE_COUNT : 0);
+    (height ? DASHBOARD_PROMPT_LINE_COUNT : 0) +
+    Math.max(0, Math.floor(additionalLines));
   const viewportLines = height
     ? Math.max(MIN_LIST_VIEWPORT_LINES, height - reservedLines)
     : entries.length;
@@ -586,6 +617,10 @@ export function renderInteractive(
       "",
       shortenText(
         `Focus: ${shortenPath(cursorRow.path, width - 7)} · branch=${shortenText(cursorRow.branch ?? "detached", 24)}`,
+        width,
+      ),
+      shortenText(
+        `Activity: ${fullActivityLabel(cursorRow.activity)} · dirty=${cursorRow.dirtyCount ?? "?"} open=${cursorRow.openProcessCount ?? "?"}`,
         width,
       ),
     );

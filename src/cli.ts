@@ -436,6 +436,7 @@ function canUseRawInteractiveSession(
 function renderSession(
   controller: InteractiveController,
   output: CliOutput,
+  additionalLines = 0,
 ): string {
   const state = controller.getState();
   return renderInteractive(state.audit, {
@@ -444,6 +445,7 @@ function renderSession(
     cursorPath: state.cursorPath,
     columns: output.columns,
     rows: output.rows ?? (output.isTTY ? DEFAULT_TERMINAL_ROWS : undefined),
+    additionalLines,
     color:
       output.color ??
       Boolean(output.isTTY && process.env.NO_COLOR === undefined),
@@ -535,8 +537,11 @@ async function runRawInteractiveSession(
   const render = (): void => {
     const state = controller.getState();
     const prompt = state.pendingDeletion ? "confirm> " : PROMPT;
+    const message = lastMessage.trimEnd();
+    const messageLines = message.length > 0 ? message.split(/\r?\n/u).length : 0;
+    const messageBlock = message.length > 0 ? `\n${message}` : "";
     output.write(
-      `${ANSI_CLEAR_SCREEN}${ANSI_HIDE_CURSOR}${lastMessage}${renderSession(controller, output)}\n\n${prompt}${commandBuffer}`,
+      `${ANSI_CLEAR_SCREEN}${ANSI_HIDE_CURSOR}${renderSession(controller, output, messageLines)}${messageBlock}\n\n${prompt}${commandBuffer}`,
     );
   };
   const finish = (): void => {

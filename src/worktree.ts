@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
+import { lstat } from "node:fs/promises";
+import { resolve, sep } from "node:path";
 
 import {
   DECISIONS,
@@ -19,6 +21,14 @@ import { mapWithConcurrency } from "./concurrency.js";
 import { parseWorktreeList } from "./discovery.js";
 
 const SIZE_BATCH_SIZE = 12;
+const FILE_MTIME_CONCURRENCY = 32;
+const GIT_FILE_LIST_ARGUMENTS = Object.freeze([
+  "ls-files",
+  "--cached",
+  "--others",
+  "--exclude-standard",
+  "-z",
+] as const);
 const REBUILDABLE_IGNORED_NAMES = new Set([
   ".cache",
   ".next",
@@ -112,6 +122,87 @@ function parseLastCommit(output: unknown): WorktreeState["lastCommit"] {
   return { date, subject };
 }
 
+function parseGitFileList(output: unknown): string[] {
+  return String(output)
+    .split("\0")
+    .filter((path) => path.length > 0);
+}
+
+function safeWorktreeFilePath(
+  worktreePath: string,
+  relativePath: string,
+): string | null {
+  const root = resolve(worktreePath);
+  const candidate = resolve(root, relativePath);
+  if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) {
+    return null;
+  }
+  return candidate;
+}
+
+function formatFileTimestamp(timestampMs: number | null): string | null {
+  if (timestampMs === null || !Number.isFinite(timestampMs)) return null;
+  const timestamp = new Date(timestampMs);
+  return Number.isNaN(timestamp.valueOf()) ? null : timestamp.toISOString();
+}
+
+function latestFileModificationFromPaths(
+  worktreePath: string,
+  paths: string[],
+): string | null {
+  let latestTimestampMs: number | null = null;
+  for (const relativePath of paths) {
+    const filePath = safeWorktreeFilePath(worktreePath, relativePath);
+    if (!filePath) continue;
+    try {
+      const fileStat = lstatSync(filePath);
+      if (!fileStat.isFile()) continue;
+      latestTimestampMs = Math.max(latestTimestampMs ?? 0, fileStat.mtimeMs);
+    } catch {
+      continue;
+    }
+  }
+  return formatFileTimestamp(latestTimestampMs);
+}
+
+async function latestFileModificationFromPathsAsync(
+  worktreePath: string,
+  paths: string[],
+): Promise<string | null> {
+  const timestamps = await mapWithConcurrency(
+    paths,
+    FILE_MTIME_CONCURRENCY,
+    async (relativePath) => {
+      const filePath = safeWorktreeFilePath(worktreePath, relativePath);
+      if (!filePath) return null;
+      try {
+        const fileStat = await lstat(filePath);
+        return fileStat.isFile() ? fileStat.mtimeMs : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  const latestTimestampMs = timestamps.reduce<number | null>(
+    (latest, timestamp) =>
+      timestamp === null ? latest : Math.max(latest ?? 0, timestamp),
+    null,
+  );
+  return formatFileTimestamp(latestTimestampMs);
+}
+
+function gitFileList(
+  worktreePath: string,
+  runCommand: CommandRunner,
+): string[] {
+  const result = runCommand("git", [
+    "-C",
+    worktreePath,
+    ...GIT_FILE_LIST_ARGUMENTS,
+  ]);
+  return result.status === 0 ? parseGitFileList(result.stdout) : [];
+}
+
 function parseSize(output: unknown): number | null {
   const value = Number.parseInt(
     String(output).trim().split(/\s+/u)[0] ?? "",
@@ -163,6 +254,10 @@ export function collectWorktreeState(
     "--format=%cI%x09%s",
     worktree.head ?? "",
   ]);
+  const lastFileModifiedAt = latestFileModificationFromPaths(
+    worktree.path,
+    gitFileList(worktree.path, runCommand),
+  );
   const size =
     sizeKib === undefined ? runCommand("du", ["-sk", worktree.path]) : null;
   const openFiles = deepProcessScan
@@ -182,6 +277,7 @@ export function collectWorktreeState(
     ignoredUnknownCount: ignoredState?.unknownCount ?? null,
     sizeKib: sizeKib === undefined ? parseSize(size?.stdout ?? "") : sizeKib,
     lastCommit: parseLastCommit(lastCommit.stdout),
+    lastFileModifiedAt,
     openProcessCount: deepProcessScan
       ? openFiles
         ? countOpenProcesses(openFiles)
@@ -199,39 +295,52 @@ export async function collectWorktreeStateAsync(
     sizeKib,
   }: AsyncWorktreeStateOptions = {},
 ): Promise<WorktreeState> {
-  const [status, ignored, lastCommit, size, openFiles] = await Promise.all([
-    runCommand("git", [
-      "-C",
-      worktree.path,
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-    ]),
-    runCommand("git", [
-      "-C",
-      worktree.path,
-      "status",
-      "--porcelain=v1",
-      "--ignored",
-      "--untracked-files=all",
-    ]),
-    runCommand("git", [
-      "-C",
-      worktree.path,
-      "show",
-      "-s",
-      "--format=%cI%x09%s",
-      worktree.head ?? "",
-    ]),
-    sizeKib === undefined
-      ? runCommand("du", ["-sk", worktree.path])
-      : Promise.resolve(null),
-    deepProcessScan
-      ? runCommand("lsof", ["-F", "p", "+D", worktree.path])
-      : Promise.resolve(null),
-  ]);
+  const [status, ignored, lastCommit, size, openFiles, fileList] =
+    await Promise.all([
+      runCommand("git", [
+        "-C",
+        worktree.path,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+      ]),
+      runCommand("git", [
+        "-C",
+        worktree.path,
+        "status",
+        "--porcelain=v1",
+        "--ignored",
+        "--untracked-files=all",
+      ]),
+      runCommand("git", [
+        "-C",
+        worktree.path,
+        "show",
+        "-s",
+        "--format=%cI%x09%s",
+        worktree.head ?? "",
+      ]),
+      sizeKib === undefined
+        ? runCommand("du", ["-sk", worktree.path])
+        : Promise.resolve(null),
+      deepProcessScan
+        ? runCommand("lsof", ["-F", "p", "+D", worktree.path])
+        : Promise.resolve(null),
+      runCommand("git", [
+        "-C",
+        worktree.path,
+        ...GIT_FILE_LIST_ARGUMENTS,
+      ]),
+    ]);
   const ignoredState =
     ignored.status === 0 ? ignoredDetails(ignored.stdout) : null;
+  const lastFileModifiedAt =
+    fileList.status === 0
+      ? await latestFileModificationFromPathsAsync(
+          worktree.path,
+          parseGitFileList(fileList.stdout),
+        )
+      : null;
 
   return {
     ...worktree,
@@ -244,6 +353,7 @@ export async function collectWorktreeStateAsync(
     ignoredUnknownCount: ignoredState?.unknownCount ?? null,
     sizeKib: sizeKib === undefined ? parseSize(size?.stdout ?? "") : sizeKib,
     lastCommit: parseLastCommit(lastCommit.stdout),
+    lastFileModifiedAt,
     openProcessCount: deepProcessScan
       ? openFiles
         ? countOpenProcesses(openFiles)

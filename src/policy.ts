@@ -3,6 +3,7 @@ import {
   WARNING_CODES,
   type AuditWarning,
   type AuditRow,
+  type ActivityEvidence,
   type ChatEvidence,
   type Decision,
   type PullRequestEvidence,
@@ -113,6 +114,32 @@ function markerFor(decision: Decision): string {
   return "🔴";
 }
 
+function normalizeTimestamp(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.valueOf()) ? null : timestamp.toISOString();
+}
+
+function latestChatTimestamp(chat: ChatEvidence): string | null {
+  return chat.threads.reduce<string | null>((latest, thread) => {
+    const timestamp = normalizeTimestamp(thread.updatedAt);
+    if (!timestamp) return latest;
+    if (!latest || timestamp > latest) return timestamp;
+    return latest;
+  }, null);
+}
+
+function activityEvidence(
+  state: WorktreeState,
+  chat: ChatEvidence,
+): ActivityEvidence {
+  const chatTimestamp = latestChatTimestamp(chat);
+  if (chatTimestamp) return { source: "chat", timestamp: chatTimestamp };
+  const fileTimestamp = normalizeTimestamp(state.lastFileModifiedAt);
+  if (fileTimestamp) return { source: "file", timestamp: fileTimestamp };
+  return { source: "unknown" };
+}
+
 export function buildAuditRow({
   state,
   pr,
@@ -130,6 +157,7 @@ export function buildAuditRow({
     ...state,
     pr,
     chat,
+    activity: activityEvidence(state, chat),
     decision,
     marker: markerFor(decision),
     size: formatGib(state.sizeKib),
