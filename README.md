@@ -39,21 +39,33 @@ Git repository. `--all` makes the recursive workspace scan explicit.
 ## Interactive controls
 
 ```text
-↑/↓       move
-Space     select or unselect
-Enter     open the command prompt
-/preview  review selected worktrees
-/delete   start the confirmation flow
-q         quit
+↑/↓       move the focused row
+Space     select or unselect it
+Enter     open the visible command mode
+Esc       cancel command input or confirmation
+?         show the shortcut panel
+q         quit from navigation mode
 ```
 
-After `/delete`, type `DELETE` or `confirm`. The status line shows each audit,
-validation, and removal step. A successful deletion removes the row from the
-dashboard and clears the selection; cancelling also clears the selection.
+The dashboard always shows the scope, filter, list position, selected count,
+focused worktree, full path, branch, evidence, activity timestamp, local
+warnings, and current decision. Long values stay readable in the focused
+details panel instead of being pushed off the right edge.
 
-`◆ MAIN` is protected. `○ SAFE` is a deletion candidate. `⚠️` means the
-candidate has a local warning. `✅` means it is selected. `🔒` means required
-GitHub or Codex identity evidence is missing or ambiguous.
+Every refresh and deletion has an explicit mode and event trail. After
+`/delete`, type `DELETE` or `confirm`. Worktree removal is revalidated and the
+same scope is audited again before the dashboard reports the final state. If
+that refresh fails, the CLI says that the state is unverified and tells you to
+run `/refresh`.
+
+Useful commands include `/details` for the focused row, `/errors` for full scan
+errors, `/preview` for a deletion preview, `/safe` to select candidates, and
+`/refresh` to run a new audit.
+
+`M MAIN` is protected. `[ ]` is unselected and `[x]` is selected. `!` means a
+local warning. `?` means required GitHub or Codex identity evidence is missing
+or ambiguous. The focused row is marked with `▶` and selected rows are also
+colored when the terminal supports color.
 
 Each row shows the latest known Codex chat update. When no chat timestamp is
 available, it falls back to the newest modification time among tracked and
@@ -65,6 +77,10 @@ file; the focused row shows the full timestamp.
 Local warnings include uncommitted changes, open processes, unclassified
 ignored files, unavailable local scans, and an active Codex chat. They are
 shown clearly but do not make an otherwise verified candidate undeletable.
+
+Missing PR or Codex identity evidence is a separate deletion decision, not a
+local warning. The focused details panel explains exactly which evidence is
+missing or stale.
 
 Deletion always requires the exact word `DELETE` after the preview and a fresh
 validation. Warning rows use `git worktree remove --force`, so review them

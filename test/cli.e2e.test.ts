@@ -17,6 +17,7 @@ const PTY_TIMEOUT_MS = 15_000;
 const PTY_ACTIONS = Object.freeze({
   SELECT_AND_QUIT: "select-and-quit",
   SELECT_AND_DELETE: "select-and-delete",
+  ENTER_COMMAND: "enter-command",
 } as const);
 type PtyAction = (typeof PTY_ACTIONS)[keyof typeof PTY_ACTIONS];
 const REPOSITORY_ROOT = join(
@@ -115,17 +116,28 @@ try:
                 break
             os.write(sys.stdout.fileno(), data)
             buffer.extend(data)
-            if not sent_keys and b"audit> " in buffer:
+            if not sent_keys and b"navigate> " in buffer:
                 sent_keys = True
-                os.write(master_fd, b"\x1b[B")
-                time.sleep(${KEY_DELAY_MS / 1000})
-                os.write(master_fd, b" ")
-                time.sleep(${KEY_DELAY_MS / 1000})
+                if action == "${PTY_ACTIONS.ENTER_COMMAND}":
+                    os.write(master_fd, b"\r")
+                else:
+                    os.write(master_fd, b"\x1b[B")
+                    time.sleep(${KEY_DELAY_MS / 1000})
+                    os.write(master_fd, b" ")
+                    time.sleep(${KEY_DELAY_MS / 1000})
                 if action == "${PTY_ACTIONS.SELECT_AND_DELETE}":
                     os.write(master_fd, b"/delete\r")
-                else:
+                elif action == "${PTY_ACTIONS.SELECT_AND_QUIT}":
                     os.write(master_fd, b"q")
                     sent_exit = True
+
+            if (
+                action == "${PTY_ACTIONS.ENTER_COMMAND}"
+                and sent_keys
+                and not sent_exit
+                and b"command> " in buffer
+            ):
+                os.write(master_fd, b"/details\r")
 
             if (
                 action == "${PTY_ACTIONS.SELECT_AND_DELETE}"
@@ -135,6 +147,15 @@ try:
                     b"No SAFE selection can be deleted" in buffer
                     or b"Deletion preview" in buffer
                 )
+            ):
+                os.write(master_fd, b"q")
+                sent_exit = True
+
+            if (
+                action == "${PTY_ACTIONS.ENTER_COMMAND}"
+                and sent_keys
+                and not sent_exit
+                and b"Focused worktree details printed" in buffer
             ):
                 os.write(master_fd, b"q")
                 sent_exit = True
@@ -235,12 +256,12 @@ describe("CLI interaction E2E", () => {
         const result = await runCliInPty(fixture.repositoryRoot);
 
         assert.equal(result.code, 0, result.output);
-        assert.match(result.output, /▶\s+◆\s+1\s+MAIN/u);
-        assert.match(result.output, /▶\s+⚠️\s+2\s+UNKNOWN/u);
-        assert.match(result.output, /1 selected · 0 SAFE/u);
+        assert.match(result.output, /M\s+\[ \]\s+1 MAIN/u);
+        assert.match(result.output, /\?\s+\[x\]\s+2 UNKNOWN/u);
+        assert.match(result.output, /Selected: 1 · deletable: 0/u);
         assert.match(
           result.output,
-          /Blocked: GitHub PR evidence unavailable/u,
+          /Decision: GitHub PR evidence unavailable/u,
         );
         assert.match(result.output, /Session ended\./u);
       } finally {
@@ -273,6 +294,34 @@ describe("CLI interaction E2E", () => {
           lastFrame,
           /Status: ⚠️ No SAFE selection can be deleted\. Select a SAFE row\./u,
         );
+      } finally {
+        rmSync(fixture.tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "makes Enter open an explicit command mode",
+    {
+      skip:
+        process.platform === "win32"
+          ? "A POSIX PTY and Python 3 are required for this test."
+          : false,
+      timeout: PTY_TIMEOUT_MS,
+    },
+    async () => {
+      const fixture = createGitFixture();
+
+      try {
+        const result = await runCliInPty(
+          fixture.repositoryRoot,
+          PTY_ACTIONS.ENTER_COMMAND,
+        );
+
+        assert.equal(result.code, 0, result.output);
+        assert.match(result.output, /COMMAND MODE/u);
+        assert.match(result.output, /Path: .*repo/u);
+        assert.match(result.output, /Focused worktree details printed/u);
       } finally {
         rmSync(fixture.tempRoot, { recursive: true, force: true });
       }

@@ -15,6 +15,8 @@ export interface CliOutput {
 
 export type Filter = "all" | "safe" | "review" | "unknown";
 
+export type InputMode = "navigate" | "command" | "confirm";
+
 export type InteractiveCommand = {
   command: string;
   argument: string;
@@ -22,6 +24,8 @@ export type InteractiveCommand = {
 
 export const DELETE_CONFIRMATION = "DELETE";
 export const PROMPT = "audit> ";
+export const COMMAND_PROMPT = "command> ";
+export const CONFIRM_PROMPT = "confirm> ";
 export const DEFAULT_FILTER: Filter = "all";
 export const SAFE_FILTER: Filter = "safe";
 export const FILTERS: ReadonlySet<Filter> = new Set([
@@ -43,6 +47,7 @@ export type TerminalKey =
   | { kind: "backspace" }
   | { kind: "escape" }
   | { kind: "interrupt" }
+  | { kind: "redraw" }
   | { kind: "character"; value: string };
 
 const ANSI_ESCAPE = "\u001b";
@@ -61,63 +66,60 @@ const TERMINAL_KEY_SEQUENCES: ReadonlyArray<readonly [string, TerminalKey]> = [
 
 const DEFAULT_TERMINAL_COLUMNS = 100;
 export const DEFAULT_TERMINAL_ROWS = 24;
-const MIN_TERMINAL_COLUMNS = 80;
+const MIN_TERMINAL_COLUMNS = 40;
 const INDEX_COLUMN_WIDTH = 3;
 const STATUS_COLUMN_WIDTH = 7;
-const SIZE_COLUMN_WIDTH = 6;
 const MIN_REPOSITORY_COLUMN_WIDTH = 12;
-const MIN_EVIDENCE_COLUMN_WIDTH = 14;
 const MIN_ACTIVITY_COLUMN_WIDTH = 10;
 const MIN_PATH_COLUMN_WIDTH = 18;
-const ROW_FIXED_COLUMN_COUNT = 24;
+const MIN_BRANCH_COLUMN_WIDTH = 10;
+const ROW_FIXED_COLUMN_COUNT = 21;
 const MIN_TERMINAL_ROWS = 8;
-const DASHBOARD_HEADER_LINE_COUNT = 3;
-const DASHBOARD_STATUS_LINE_COUNT = 1;
 const DASHBOARD_SCROLL_LINE_COUNT = 1;
-const DASHBOARD_FOOTER_LINE_COUNT = 5;
-const DASHBOARD_FOCUS_LINE_COUNT = 2;
-const DASHBOARD_FOCUS_WARNING_LINE_COUNT = 2;
-const DASHBOARD_FOCUS_BLOCKER_LINE_COUNT = 2;
-const DASHBOARD_ERROR_LINE_COUNT = 2;
-const DASHBOARD_PROMPT_LINE_COUNT = 2;
+const DASHBOARD_FOCUS_HEADER_LINE_COUNT = 1;
+const DASHBOARD_EVENT_LINE_COUNT = 3;
+const DASHBOARD_ERROR_LINE_COUNT = 1;
 const MIN_LIST_VIEWPORT_LINES = 1;
 const ANSI_GREEN = "\u001b[32m";
 const ANSI_YELLOW = "\u001b[33m";
 const ANSI_BOLD = "\u001b[1m";
 const ANSI_RESET = "\u001b[0m";
 const SELECTION_MARKERS = Object.freeze({
-  selected: "✅",
-  selectedBlocked: "⚠️",
-  safe: "○",
-  blocked: "🔒",
-  main: "◆",
+  selected: "[x]",
+  unselected: "[ ]",
+  warning: "!",
+  blocked: "?",
+  main: "M",
 } as const);
 
 export const HELP = `
-Commands:
-  /help                  Show this help
-  /list                  Show visible worktrees
-  /filter <name>         Filter: all, safe, review, unknown
-  /select <n,...>        Select visible rows by number
-  /safe                  Select all SAFE rows
-  /clear                 Clear the selection
-  /preview               Preview deletion
-  /delete                Request confirmation, then revalidate before deletion
-  /refresh               Re-run the full audit
-  /json                  Print the structured result
-  /plain                 Print the non-interactive report
-  /cancel                Cancel the pending confirmation
-  /quit                  Exit
-
 Keyboard:
-  ↑/↓                    Move the focused row
-  Space                  Toggle the focused row
-  Enter                  Edit and run a command
-  q                      Exit
+  ↑/↓      Move the focused row
+  Space    Select or unselect the focused row
+  Enter    Open the command input
+  Esc      Cancel command input or confirmation
+  ?        Show this help
+  q        Quit from navigation mode
 
-✅ marks selected SAFE rows; ⚠️ marks rows with warnings or blocked evidence.
-Warnings are shown before forced removal. Deletion accepts DELETE or confirm,
-then performs a second validation.
+Commands:
+  /help, /?                 Show this help
+  /filter <all|safe|...>    Change the visible list
+  /select <n,...>           Select visible rows by number or range
+  /safe                    Select all SAFE rows
+  /clear                   Clear the selection
+  /details                 Show the focused row details
+  /errors                  Show all scan errors
+  /preview                 Preview the selected deletion
+  /delete                  Confirm, revalidate, remove, and refresh
+  /refresh                 Re-run the full audit
+  /json                    Print the structured result
+  /plain                   Print the non-interactive report
+  /quit                    Exit
+
+The left gutter is always explicit: [x] selected, [ ] unselected, ! warning,
+? evidence unavailable, M protected main worktree. Local warnings do not make
+a verified SAFE row undeletable. Missing PR or chat identity evidence is shown
+separately as the reason a row is not SAFE.
 `;
 
 const MAX_PREVIEW_ROWS = 20;
@@ -212,6 +214,8 @@ export function parseTerminalKeys(
       keys.push({ kind: "space" });
     } else if (character === "\u0003" || character === "\u0004") {
       keys.push({ kind: "interrupt" });
+    } else if (character === "\u000c") {
+      keys.push({ kind: "redraw" });
     } else {
       keys.push({ kind: "character", value: character });
     }
@@ -229,7 +233,9 @@ function terminalColumns(columns: number | undefined): number {
 
 function shortenText(value: unknown, maxLength: number): string {
   const text = String(value ?? "");
+  if (maxLength <= 0) return "";
   if (text.length <= maxLength) return text;
+  if (maxLength === 1) return "…";
   const prefixLength = Math.ceil((maxLength - 1) / 2);
   const suffixLength = maxLength - 1 - prefixLength;
   return `${text.slice(0, prefixLength)}…${text.slice(-suffixLength)}`;
@@ -237,10 +243,53 @@ function shortenText(value: unknown, maxLength: number): string {
 
 function shortenPath(path: string, maxLength: number): string {
   if (path.length <= maxLength) return path;
+  if (maxLength <= 1) return "…";
   const segments = path.split("/").filter(Boolean);
   const tail = segments.slice(-2).join("/");
   const prefix = path.startsWith("/") ? "/" : "";
   return shortenText(`${prefix}…/${tail}`, maxLength);
+}
+
+function fitLine(value: string, width: number): string {
+  return shortenText(value, Math.max(1, width));
+}
+
+function wrapContent(value: string, width: number): string[] {
+  const maxWidth = Math.max(1, width);
+  const lines: string[] = [];
+  let current = "";
+  const flush = (): void => {
+    if (current.length > 0) lines.push(current);
+    current = "";
+  };
+
+  for (const word of value.split(/\s+/u).filter(Boolean)) {
+    if (word.length > maxWidth) {
+      flush();
+      for (let offset = 0; offset < word.length; offset += maxWidth) {
+        lines.push(word.slice(offset, offset + maxWidth));
+      }
+      continue;
+    }
+    const next = current.length > 0 ? `${current} ${word}` : word;
+    if (next.length > maxWidth) {
+      flush();
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+  flush();
+  return lines.length > 0 ? lines : [""];
+}
+
+function wrapValue(label: string, value: string, width: number): string[] {
+  const prefix = `${label}: `;
+  const available = Math.max(1, width - prefix.length);
+  const contentLines = wrapContent(value, available);
+  return contentLines.map((line, index) =>
+    fitLine(index === 0 ? `${prefix}${line}` : `  ${line}`, width),
+  );
 }
 
 function statusLabel(row: AuditRow): string {
@@ -322,16 +371,6 @@ function fullActivityLabel(activity: ActivityEvidence | undefined): string {
   return `${activity.source} ${activity.timestamp}`;
 }
 
-function compactEvidence(row: AuditRow): string {
-  const evidence: string[] = [];
-  if (row.pr.pullRequest) evidence.push(compactPullRequest(row));
-  if (row.chat.threads.length > 0) evidence.push(compactChat(row));
-  if (!row.pr.pullRequest || row.chat.threads.length === 0) {
-    evidence.push(`branch:${shortenText(branchLabel(row), 18)}`);
-  }
-  return evidence.join("·") || "branch:unknown";
-}
-
 function compactActivity(row: AuditRow): string {
   return activityLabel(row.activity);
 }
@@ -340,9 +379,10 @@ interface RowFormatOptions {
   selected: Set<string>;
   cursorPath: string | null;
   columns: number;
+  indexWidth: number;
   repositoryWidth: number;
+  branchWidth: number;
   pathWidth: number;
-  evidenceWidth: number;
   activityWidth: number;
   color: boolean;
 }
@@ -359,9 +399,10 @@ function formatRow(
     selected,
     cursorPath,
     columns,
+    indexWidth,
     repositoryWidth,
+    branchWidth,
     pathWidth,
-    evidenceWidth,
     activityWidth,
     color,
   }: RowFormatOptions,
@@ -369,29 +410,33 @@ function formatRow(
   const cursor = row.path === cursorPath ? "▶" : " ";
   const isSelected = selected.has(row.path);
   const hasWarnings = rowWarnings(row).length > 0;
-  const isSafeSelected =
-    row.decision === DECISIONS.REMOVE_CANDIDATE && selected.has(row.path);
-  const selection = isSelected
-    ? isSafeSelected
-      ? SELECTION_MARKERS.selected
-      : SELECTION_MARKERS.selectedBlocked
-    : row.decision === DECISIONS.KEEP_MAIN
-      ? SELECTION_MARKERS.main
-      : row.decision === DECISIONS.REMOVE_CANDIDATE
-        ? hasWarnings
-          ? SELECTION_MARKERS.selectedBlocked
-          : SELECTION_MARKERS.safe
+  const isSafe = row.decision === DECISIONS.REMOVE_CANDIDATE;
+  const isSafeSelected = isSafe && isSelected;
+  const marker = row.decision === DECISIONS.KEEP_MAIN
+    ? SELECTION_MARKERS.main
+    : hasWarnings
+      ? SELECTION_MARKERS.warning
+      : isSafe
+        ? " "
         : SELECTION_MARKERS.blocked;
+  const selection = isSelected
+    ? SELECTION_MARKERS.selected
+    : SELECTION_MARKERS.unselected;
   const repositoryLabel = row.repository ?? row.repoRoot ?? "local";
   const repository = shortenText(repositoryLabel, repositoryWidth);
+  const branch = shortenText(branchLabel(row), branchWidth);
   const path = shortenPath(row.path, pathWidth);
-  const evidence = shortenText(compactEvidence(row), evidenceWidth);
   const activity = shortenText(compactActivity(row), activityWidth);
-  const indexLabel = String(index).padStart(INDEX_COLUMN_WIDTH);
-  const size = compactSize(row.size).padStart(SIZE_COLUMN_WIDTH);
+  const indexLabel = String(index).padStart(indexWidth);
   const status = statusLabel(row).padEnd(STATUS_COLUMN_WIDTH);
-  const rowText = `${cursor} ${selection} ${indexLabel} ${status} ${size} ${repository.padEnd(repositoryWidth)} ${path.padEnd(pathWidth)} ${evidence.padEnd(evidenceWidth)} ${activity}`;
-  const visibleRow = rowText.slice(0, columns).trimEnd();
+  const rowText = [
+    `${cursor} ${marker} ${selection} ${indexLabel} ${status}`,
+    repository.padEnd(repositoryWidth),
+    branch.padEnd(branchWidth),
+    activity.padEnd(activityWidth),
+    path,
+  ].join(" ");
+  const visibleRow = fitLine(rowText, columns);
   if (!color || !isSelected) return visibleRow;
   const ansiColor = isSafeSelected && !hasWarnings ? ANSI_GREEN : ANSI_YELLOW;
   return `${ansiColor}${ANSI_BOLD}${visibleRow}${ANSI_RESET}`;
@@ -469,20 +514,110 @@ function viewportForEntries(
 function scrollStatus(
   rows: AuditRow[],
   cursorPath: string | null,
-  start: number,
-  end: number,
-  totalEntries: number,
+  visibleEntries: DashboardEntry[],
 ): string {
   const cursorIndex = rows.findIndex((row) => row.path === cursorPath);
+  const visibleRows = visibleEntries
+    .filter((entry): entry is Extract<DashboardEntry, { kind: "row" }> =>
+      entry.kind === "row",
+    )
+    .map((entry) => entry.index);
+  const firstVisible = visibleRows[0] ?? 0;
+  const lastVisible = visibleRows.at(-1) ?? 0;
   const position =
     cursorIndex < 0
-      ? `rows 0/${rows.length}`
-      : `row ${cursorIndex + 1}/${rows.length}`;
-  const hints = [
-    start > 0 ? "↑ more" : "",
-    end < totalEntries ? "↓ more" : "",
-  ].filter(Boolean);
-  return hints.length > 0 ? `${position} · ${hints.join(" · ")}` : position;
+      ? `focus 0/${rows.length}`
+      : `focus ${cursorIndex + 1}/${rows.length}`;
+  const viewport =
+    firstVisible > 0
+      ? `rows ${firstVisible}-${lastVisible} of ${rows.length}`
+      : `rows 0 of ${rows.length}`;
+  return `${position} · ${viewport}`;
+}
+
+function evidenceDetails(row: AuditRow): string {
+  const pr = row.pr.pullRequest
+    ? `PR #${row.pr.pullRequest.number} ${row.pr.pullRequest.state}`
+    : `PR ${row.pr.kind.toLowerCase()}`;
+  const chat = row.chat.threads[0]
+    ? `chat ${row.chat.threads[0].status.toLowerCase()}`
+    : `chat ${row.chat.kind.toLowerCase()}`;
+  return `${pr} · ${chat}`;
+}
+
+function localDetails(row: AuditRow): string {
+  const dirty = row.dirtyCount === null ? "dirty ?" : `dirty ${row.dirtyCount}`;
+  const processes = row.openProcessCount === null
+    ? "processes ?"
+    : `processes ${row.openProcessCount}`;
+  const ignored = row.ignoredUnknownCount === null
+    ? "ignored ?"
+    : `ignored unknown ${row.ignoredUnknownCount}`;
+  return `${dirty} · ${processes} · ${ignored} · size ${row.size}`;
+}
+
+function focusedDetails(
+  row: AuditRow,
+  position: string,
+  width: number,
+  compact = false,
+): string[] {
+  if (compact) {
+    const warningSummary = rowWarnings(row).length > 0
+      ? ` · warnings: ${rowWarnings(row).map((warning) => warning.message).join("; ")}`
+      : "";
+    return [
+      `FOCUS ${position} · ${statusLabel(row)} · ${row.repository ?? row.repoRoot ?? "local repository"}`,
+      ...wrapValue("Path", row.path, width),
+      ...wrapValue("Branch", branchLabel(row), width),
+      ...wrapValue("Evidence", evidenceDetails(row), width),
+      ...wrapValue(
+        "Activity",
+        `${fullActivityLabel(row.activity)} · ${localDetails(row)}`,
+        width,
+      ),
+      ...wrapValue(
+        "Decision",
+        `${blockingReason(row) ?? "eligible for deletion after confirmation"}${warningSummary}`,
+        width,
+      ),
+    ];
+  }
+
+  const lines = [
+    `FOCUS ${position} · ${statusLabel(row)} · ${row.repository ?? row.repoRoot ?? "local repository"}`,
+    ...wrapValue("Path", row.path, width),
+    ...wrapValue("Branch", branchLabel(row), width),
+    ...wrapValue("Evidence", evidenceDetails(row), width),
+    ...wrapValue("Activity", fullActivityLabel(row.activity), width),
+    ...wrapValue("Local", localDetails(row), width),
+    ...wrapValue(
+      "Decision",
+      blockingReason(row) ?? "eligible for deletion after confirmation",
+      width,
+    ),
+  ];
+  const warnings = rowWarnings(row);
+  if (warnings.length > 0) {
+    lines.push(
+      ...wrapValue(
+        "Warnings",
+        warnings.map((warning) => warning.message).join(" · "),
+        width,
+      ),
+    );
+  }
+  return lines;
+}
+
+function modeHint(mode: InputMode): string {
+  if (mode === "command") {
+    return "COMMAND MODE · type /help, /delete, /refresh · Enter run · Esc cancel";
+  }
+  if (mode === "confirm") {
+    return "CONFIRMATION · type DELETE to continue · Esc cancels and clears selection";
+  }
+  return "NAVIGATION · ↑/↓ move · Space select · Enter commands · ? help · q quit";
 }
 
 export function renderInteractive(
@@ -495,6 +630,11 @@ export function renderInteractive(
     rows: terminalRowValue,
     additionalLines = 0,
     status = "",
+    events = [],
+    mode = "navigate",
+    commandBuffer = "",
+    updatedAt,
+    busy = false,
     color = false,
   }: {
     selected?: Set<string>;
@@ -504,12 +644,18 @@ export function renderInteractive(
     rows?: number;
     additionalLines?: number;
     status?: string;
+    events?: string[];
+    mode?: InputMode;
+    commandBuffer?: string;
+    updatedAt?: string | null;
+    busy?: boolean;
     color?: boolean;
   } = {},
 ): string {
   const width = terminalColumns(columns);
   const height = terminalRows(terminalRowValue);
   const rows = navigationRows(audit, filter);
+  const activeCursorPath = cursorPath ?? rows[0]?.path ?? null;
   const mainRows = rows.filter((row) => row.decision === DECISIONS.KEEP_MAIN);
   const linkedRows = rows.filter((row) => row.decision !== DECISIONS.KEEP_MAIN);
   const rowNumbers = new Map(
@@ -523,84 +669,120 @@ export function renderInteractive(
   const warningCount = audit.rows.filter(
     (row) => rowWarnings(row).length > 0,
   ).length;
-  const variableColumns = width - ROW_FIXED_COLUMN_COUNT;
+  const variableColumns = Math.max(10, width - ROW_FIXED_COLUMN_COUNT);
   const repositoryWidth = Math.max(
     MIN_REPOSITORY_COLUMN_WIDTH,
-    Math.min(24, Math.floor(variableColumns * 0.22)),
+    Math.min(24, Math.floor(variableColumns * 0.24)),
   );
-  const evidenceWidth = Math.max(
-    MIN_EVIDENCE_COLUMN_WIDTH,
-    Math.min(22, Math.floor(variableColumns * 0.2)),
+  const branchWidth = Math.max(
+    MIN_BRANCH_COLUMN_WIDTH,
+    Math.min(24, Math.floor(variableColumns * 0.24)),
   );
   const activityWidth = Math.max(
     MIN_ACTIVITY_COLUMN_WIDTH,
-    Math.min(18, Math.floor(variableColumns * 0.16)),
+    Math.min(18, Math.floor(variableColumns * 0.17)),
   );
   const pathWidth = Math.max(
     MIN_PATH_COLUMN_WIDTH,
-    variableColumns - repositoryWidth - evidenceWidth - activityWidth - 3,
+    variableColumns - repositoryWidth - branchWidth - activityWidth - 3,
   );
   const mainCount = audit.rows.filter(
     (row) => row.decision === DECISIONS.KEEP_MAIN,
   ).length;
+  const indexWidth = Math.max(INDEX_COLUMN_WIDTH, String(rows.length).length);
   const formatOptions: RowFormatOptions = {
     selected,
-    cursorPath,
+    cursorPath: activeCursorPath,
     columns: width,
+    indexWidth,
     repositoryWidth,
+    branchWidth,
     pathWidth,
-    evidenceWidth,
     activityWidth,
     color,
   };
   const entries = buildDashboardEntries(mainRows, linkedRows, rowNumbers);
-  const cursorRow = rows.find((row) => row.path === cursorPath);
+  const cursorRow = rows.find((row) => row.path === activeCursorPath);
   const hasErrors = "errors" in audit && audit.errors.length > 0;
+  const compactLayout = height !== null && height < 28;
+  const focusPosition = cursorRow
+    ? `${rows.findIndex((row) => row.path === cursorRow.path) + 1}/${rows.length}`
+    : `0/${rows.length}`;
+  const scope = fitLine(`Scope: ${auditTitle(audit)}`, width);
+  const updated = updatedAt
+    ? `updated ${new Date(updatedAt).toISOString()}`
+    : "updated after audit";
+  const overviewLine = [
+    `View: ${filter.toUpperCase()}`,
+    `${audit.rows.length} worktrees`,
+    `${mainCount} main`,
+    `${safeCount} safe`,
+    `${warningCount} warnings`,
+  ].join(" · ");
+  const viewLines = [
+    overviewLine,
+    `Selected: ${selectedCount} · deletable: ${safeSelectedCount}`,
+  ].flatMap((line) => wrapContent(line, width));
+  const stateLines = wrapContent(
+    `State: ${busy ? "working" : "ready"} · ${updated}`,
+    width,
+  );
+  const modeLines = wrapContent(modeHint(mode), width);
+  const statusLines = status
+    ? wrapContent(`Status: ${status}`, width)
+    : [];
+  const headerLines = [
+    fitLine("Worktree Cleaner", width),
+    scope,
+    ...viewLines,
+    ...stateLines,
+    ...modeLines,
+  ];
+  const details = cursorRow
+    ? focusedDetails(cursorRow, focusPosition, width, compactLayout)
+    : [];
+  const eventLines = compactLayout
+    ? []
+    : events
+        .filter((event) => event.trim().length > 0)
+        .slice(-DASHBOARD_EVENT_LINE_COUNT)
+        .map((event) => fitLine(`• ${event}`, width));
+  const footerLines = compactLayout || mode !== "navigate"
+    ? []
+    : [
+        fitLine(
+          "Actions: /safe selects candidates · /preview explains deletion · /delete removes after validation",
+          width,
+        ),
+      ];
+  const promptLineCount = additionalLines > 0 ? additionalLines + 3 : 2;
   const reservedLines =
-    DASHBOARD_HEADER_LINE_COUNT +
-    (status ? DASHBOARD_STATUS_LINE_COUNT : 0) +
-    DASHBOARD_SCROLL_LINE_COUNT +
-    DASHBOARD_FOOTER_LINE_COUNT +
-    (cursorRow ? DASHBOARD_FOCUS_LINE_COUNT : 0) +
-    (cursorRow && rowWarnings(cursorRow).length > 0
-      ? DASHBOARD_FOCUS_WARNING_LINE_COUNT
-      : 0) +
-    (cursorRow && blockingReason(cursorRow)
-      ? DASHBOARD_FOCUS_BLOCKER_LINE_COUNT
-      : 0) +
+    headerLines.length +
+    statusLines.length +
+    (height ? DASHBOARD_SCROLL_LINE_COUNT : 0) +
+    2 +
+    DASHBOARD_FOCUS_HEADER_LINE_COUNT +
+    (details.length > 0 ? details.length : 1) +
+    (eventLines.length > 0 ? 1 + eventLines.length : 0) +
     (hasErrors ? DASHBOARD_ERROR_LINE_COUNT : 0) +
-    (height ? DASHBOARD_PROMPT_LINE_COUNT : 0) +
-    Math.max(0, Math.floor(additionalLines));
+    footerLines.length +
+    promptLineCount;
   const viewportLines = height
     ? Math.max(MIN_LIST_VIEWPORT_LINES, height - reservedLines)
     : entries.length;
-  const viewport = viewportForEntries(entries, cursorPath, viewportLines);
-  const summary = [
-    `${audit.rows.length} worktrees`,
-    `${mainCount} main`,
-    `${safeCount} SAFE`,
-    `${warningCount} warn`,
-    `${selectedCount} selected`,
-    `${safeSelectedCount} SAFE`,
-    `filter=${filter}`,
-  ].join(" · ");
-  const lines = [
-    `Worktree Cleaner  ${shortenText(auditTitle(audit), width - 19)}`,
-    summary,
-    ...(status ? [shortenText(`Status: ${status}`, width)] : []),
-    "",
-  ];
+  const viewport = viewportForEntries(entries, activeCursorPath, viewportLines);
+  const lines = [...headerLines];
+  lines.push(...statusLines);
   if (height) {
     lines.push(
       scrollStatus(
         rows,
-        cursorPath,
-        viewport.start,
-        viewport.end,
-        entries.length,
+        activeCursorPath,
+        entries.slice(viewport.start, viewport.end),
       ),
     );
   }
+  lines.push("-".repeat(Math.min(width, 80)));
   if (entries.length === 0) {
     lines.push("No rows for this filter.");
   } else {
@@ -610,51 +792,19 @@ export function renderInteractive(
         .map((entry) => dashboardEntryText(entry, formatOptions)),
     );
   }
-  lines.push(
-    "",
-    "↑/↓ move · space select · enter command · /help · q quit",
-    "Commands: /safe /preview /delete /refresh /quit",
-    "✅ SAFE selected · ⚠️ warning or blocked · ○ SAFE available",
-    "🔒 evidence blocked · ◆ MAIN protected · Space toggles",
-  );
-  if (cursorRow) {
-    lines.push(
-      "",
-      shortenText(
-        `Focus: ${shortenPath(cursorRow.path, width - 7)} · branch=${shortenText(cursorRow.branch ?? "detached", 24)}`,
-        width,
-      ),
-      shortenText(
-        `Activity: ${fullActivityLabel(cursorRow.activity)} · dirty=${cursorRow.dirtyCount ?? "?"} open=${cursorRow.openProcessCount ?? "?"}`,
-        width,
-      ),
-    );
-    const warnings = rowWarnings(cursorRow);
-    if (warnings.length > 0) {
-      lines.push(
-        "",
-        shortenText(
-          `⚠️ Warnings: ${warnings.map((warning) => warning.message).join(" · ")}`,
-          width,
-        ),
-      );
-    }
-    const reason = blockingReason(cursorRow);
-    if (reason) {
-      lines.push("", shortenText(`🔒 Blocked: ${reason}`, width));
-    }
-  }
+  lines.push("-".repeat(Math.min(width, 80)), "FOCUSED WORKTREE");
+  lines.push(...(details.length > 0 ? details : ["No worktree is focused."]));
+  if (eventLines.length > 0) lines.push("EVENTS", ...eventLines);
   if ("errors" in audit && audit.errors.length > 0) {
-    lines.push(
-      "",
-      shortenText(
-        `⚠️ ${audit.errors.length} error(s): ${audit.errors
-          .map((error) => shortenPath(error.path, 28))
-          .join(", ")}`,
-        width,
-      ),
-    );
+    lines.push(fitLine(`ERRORS: ${audit.errors.length} · run /errors for details`, width));
   }
+  const inputLine = mode === "command"
+    ? `Input: ${commandBuffer || "(empty)"} · Enter run · Esc cancel`
+    : mode === "confirm"
+      ? "Input: type DELETE exactly, then press Enter"
+      : null;
+  if (inputLine) lines.push(fitLine(inputLine, width));
+  lines.push(...footerLines);
   return lines.join("\n");
 }
 

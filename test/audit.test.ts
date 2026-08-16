@@ -863,8 +863,26 @@ detached
     assert.match(output, /Worktree Cleaner/u);
     assert.match(output, /↑\/↓ move/u);
     assert.match(output, /\/delete/u);
-    assert.match(output, /✅\s+1\s+SAFE/u);
-    assert.match(output, /✅ SAFE selected/u);
+    assert.match(output, /\[x\].*1 SAFE/u);
+    assert.match(output, /FOCUSED WORKTREE/u);
+    assert.match(output, /Selected: 1 · deletable: 1/u);
+  });
+
+  it("makes scan errors visible instead of silently hiding them", () => {
+    const output = renderInteractive({
+      root: "/workspace",
+      repositories: [],
+      rows: [],
+      errors: [
+        {
+          stage: "audit",
+          path: "/workspace/repo",
+          message: "git status timed out",
+        },
+      ],
+    });
+
+    assert.match(output, /ERRORS: 1 · run \/errors for details/u);
   });
 
   it("does not present a verified absence of a Codex chat as a blocker", () => {
@@ -883,8 +901,8 @@ detached
       { cursorPath: row.path },
     );
 
-    assert.match(output, /branch=rami\/feature-a/u);
-    assert.doesNotMatch(output, /Blocked: Codex chat: nochat/u);
+    assert.match(output, /Branch: rami\/feature-a/u);
+    assert.doesNotMatch(output, /Decision:.*chat no_chat/u);
   });
 
   it("shows the branch when PR and chat identity are unavailable", () => {
@@ -902,7 +920,7 @@ detached
       { columns: 120, cursorPath: row.path },
     );
 
-    assert.match(output, /branch:ra…r-no-chat/u);
+    assert.match(output, /Branch: rami\/no-pr-no-chat/u);
     assert.match(output, /F 08-07 18:00Z/u);
     assert.match(output, /Activity: file 2026-08-07T18:00:00\.000Z/u);
   });
@@ -935,11 +953,11 @@ detached
       },
     );
 
-    assert.match(output, /2 selected · 1 SAFE/u);
+    assert.match(output, /Selected: 2 · deletable: 1/u);
     assert.match(output, /MAIN WORKTREES \(1\)/u);
     assert.match(output, /LINKED WORKTREES \(1\)/u);
-    assert.match(output, /⚠️\s+1\s+MAIN/u);
-    assert.match(output, /✅\s+2\s+SAFE/u);
+    assert.match(output, /M\s+\[x\].*1 MAIN/u);
+    assert.match(output, /\[x\].*2 SAFE/u);
     assert.match(output, /…/u);
     for (const line of output.split("\n")) {
       assert.ok(line.length <= 80, line);
@@ -958,7 +976,7 @@ detached
       { columns: 80, cursorPath: dirty.path },
     );
 
-    assert.match(output, /▶\s+⚠️\s+1\s+SAFE/u);
+    assert.match(output, /▶\s+!\s+\[ \]\s+1\s+SAFE/u);
     assert.match(output, /Warnings: 1 uncommitted change/u);
   });
 
@@ -997,8 +1015,8 @@ detached
       { columns: 80, rows: 16, cursorPath: rows[8].path },
     );
 
-    assert.match(output, /row 9\/12 · ↑ more · ↓ more/u);
-    assert.match(output, /▶\s+○\s+  9\s+SAFE/u);
+    assert.match(output, /focus 9\/12/u);
+    assert.match(output, /▶\s+\[ \]\s+  9\s+SAFE/u);
     assert.doesNotMatch(output, /worktree-1/u);
     assert.equal(output.match(/▶/gu)?.length, 1);
   });
@@ -1015,7 +1033,7 @@ detached
       { selected: new Set([row.path]), columns: 80, color: true },
     );
 
-    assert.match(output, /✅\s+1\s+SAFE/u);
+    assert.match(output, /\[x\]\s+1\s+SAFE/u);
     assert.match(output, /\u001b\[32m\u001b\[1m/u);
     assert.match(output, /\u001b\[0m/u);
   });
@@ -1092,8 +1110,8 @@ detached
 
     assert.equal(await session, 0);
     assert.deepEqual(rawModes, [true, false]);
-    assert.match(chunks.join(""), /row 10\/12 · ↑ more · ↓ more/u);
-    assert.match(chunks.join(""), /▶\s+✅\s+10\s+SAFE/u);
+    assert.match(chunks.join(""), /focus 10\/12/u);
+    assert.match(chunks.join(""), /▶\s+\[x\]\s+10\s+SAFE/u);
     assert.match(chunks.join(""), /\u001b\[32m\u001b\[1m/u);
   });
 
@@ -1140,12 +1158,12 @@ detached
 
     assert.equal(await session, 0);
     const rendered = chunks.join("");
-    const initialMarker = rendered.indexOf("▶ ⚠️");
-    const selectedMarker = rendered.indexOf("▶ ✅");
+    const initialMarker = rendered.indexOf("▶ ! [ ]");
+    const selectedMarker = rendered.indexOf("▶ ! [x]");
     assert.ok(initialMarker >= 0);
     assert.ok(selectedMarker > initialMarker);
-    assert.match(rendered, /1 selected · 1 SAFE/u);
-    assert.match(rendered, /uncommitted change/u);
+    assert.match(rendered, /Selected: 1 · deletable: 1/u);
+    assert.match(rendered, /uncommitted\s+change/u);
     assert.deepEqual(
       selectedRows(
         { repoRoot: "/repo", repository: null, rows: [dirty] },
@@ -1191,21 +1209,27 @@ detached
       input,
       output,
       errorOutput: output,
-      auditFn: async () => ({
-        repoRoot: "/repo",
-        repository: null,
-        rows: [row],
-      }),
+      auditFn: (() => {
+        let calls = 0;
+        return async () => {
+          calls += 1;
+          return {
+            repoRoot: "/repo",
+            repository: null,
+            rows: calls === 1 ? [row] : [],
+          };
+        };
+      })(),
       verifyFn: () => true,
       removeFn: () => ({ status: 0, stdout: "", stderr: "" }),
     });
 
     input.emit("data", " ");
-    await waitForText(chunks, /1 selected · 1 SAFE/u);
+    await waitForText(chunks, /Selected: 1 · deletable: 1/u);
     input.emit("data", "/delete\r");
     await waitForText(chunks, /confirm> /u);
     input.emit("data", "confirm\r");
-    await waitForText(chunks, /Status: ✅ Finished: 1 deleted · 0 kept · 0 failed/u);
+    await waitForText(chunks, /Status: ✅ Finished: 1 deleted · 0 kept · 0 failed · state verified/u);
     input.emit("data", "q");
 
     assert.equal(await session, 0);
@@ -1214,8 +1238,10 @@ detached
     assert.match(rendered, /\[1\/1\] Validating/u);
     assert.match(rendered, /\[1\/1\] Removing/u);
     assert.match(rendered, /Deleted .*deletable/u);
+    assert.match(rendered, /Dashboard state verified/u);
     const finalFrame = rendered.split("\u001b[2J\u001b[H").at(-1) ?? "";
-    assert.match(finalFrame, /0 worktrees .*0 selected/u);
+    assert.match(finalFrame, /0 worktrees .*0 main/u);
+    assert.match(finalFrame, /Selected: 0 · deletable: 0/u);
     assert.match(finalFrame, /No rows for this filter/u);
   });
 
@@ -1238,11 +1264,17 @@ detached
       },
       output: { write() {} },
       errorOutput: { write() {} },
-      auditFn: async () => ({
-        repoRoot: "/repo",
-        repository: null,
-        rows: [dirty],
-      }),
+      auditFn: (() => {
+        let calls = 0;
+        return async () => {
+          calls += 1;
+          return {
+            repoRoot: "/repo",
+            repository: null,
+            rows: calls === 1 ? [dirty] : [],
+          };
+        };
+      })(),
       verifyFn({ allowWarnings }) {
         calls.push({ action: "verify", allowWarnings });
         return true;
@@ -1283,11 +1315,17 @@ detached
       },
       output: { write() {} },
       errorOutput: { write() {} },
-      auditFn: async () => ({
-        repoRoot: "/repo",
-        repository: null,
-        rows: [row],
-      }),
+      auditFn: (() => {
+        let calls = 0;
+        return async () => {
+          calls += 1;
+          return {
+            repoRoot: "/repo",
+            repository: null,
+            rows: calls === 1 ? [row] : [],
+          };
+        };
+      })(),
       verifyFn({ repoRoot, row: verifiedRow }) {
         calls.push({
           repoRoot,
@@ -1308,6 +1346,54 @@ detached
       { repoRoot: "/repo", path: row.path, head: row.head },
       { repoRoot: "/repo", path: row.path, removed: true },
     ]);
+  });
+
+  it("keeps a worktree visible when post-delete verification is stale", async () => {
+    const row = buildAuditRow({
+      state: state({ path: "/tmp/still-registered" }),
+      pr: { kind: "MERGED_EXACT", pullRequest: pullRequest() },
+      chat: { kind: "EXACT", threads: [] },
+      mainPath: "/repo",
+    });
+    const outputChunks: string[] = [];
+    let auditCalls = 0;
+    const result = await executeDeletion({
+      audit: { repoRoot: "/repo", repository: null, rows: [row] },
+      paths: [row.path],
+      args: {
+        cwd: "/repo",
+        cwdExplicit: true,
+        noGithub: false,
+        noChat: false,
+      },
+      output: {
+        write(chunk: string) {
+          outputChunks.push(chunk);
+        },
+      },
+      errorOutput: { write() {} },
+      auditFn: async () => {
+        auditCalls += 1;
+        return {
+          repoRoot: "/repo",
+          repository: null,
+          rows: [row],
+        };
+      },
+      verifyFn: () => true,
+      removeFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+
+    assert.equal(auditCalls, 2);
+    assert.equal(result.removed, 0);
+    assert.equal(result.failed, 1);
+    assert.equal(result.stateVerified, false);
+    assert.deepEqual(result.audit.rows, [row]);
+    assert.match(
+      outputChunks.join(""),
+      /Removal not verified .*still registered/u,
+    );
+    assert.match(outputChunks.join(""), /state unverified/u);
   });
 
   it("uses each repository root when deleting from an aggregate audit", async () => {
@@ -1348,12 +1434,18 @@ detached
       },
       output: { write() {} },
       errorOutput: { write() {} },
-      rootAuditFn: async (): Promise<AggregateAudit> => ({
-        root: "/workspace",
-        repositories: [],
-        rows,
-        errors: [],
-      }),
+      rootAuditFn: (() => {
+        let calls = 0;
+        return async (): Promise<AggregateAudit> => {
+          calls += 1;
+          return {
+            root: "/workspace",
+            repositories: [],
+            rows: calls === 1 ? rows : [],
+            errors: [],
+          };
+        };
+      })(),
       verifyFn({ repoRoot, row }) {
         calls.push({ action: "verify", repoRoot, path: row.path });
         return true;

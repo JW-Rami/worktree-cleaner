@@ -21,11 +21,12 @@ import {
 } from "./audit.js";
 import {
   DELETE_CONFIRMATION,
+  COMMAND_PROMPT,
+  CONFIRM_PROMPT,
   DEFAULT_TERMINAL_ROWS,
   DEFAULT_FILTER,
   FILTERS,
   HELP,
-  PROMPT,
   SAFE_FILTER,
   filterMergedOnly,
   isFilter,
@@ -43,6 +44,7 @@ import {
 import type {
   CliOutput,
   Filter,
+  InputMode,
   TerminalKey,
 } from "./interactive.js";
 import type {
@@ -93,6 +95,21 @@ interface DeletionResult {
   removed: number;
   kept: number;
   failed: number;
+  stateVerified: boolean;
+}
+
+function deletionResultMessage(
+  label: string,
+  result: Pick<DeletionResult, "removed" | "kept" | "failed" | "stateVerified">,
+): string {
+  const indicator = result.stateVerified ? "✅" : "⚠️";
+  const state = result.stateVerified ? "verified" : "unverified";
+  return [
+    `${indicator} ${label}: ${result.removed} deleted`,
+    `${result.kept} kept`,
+    `${result.failed} failed`,
+    `state ${state}`,
+  ].join(" · ");
 }
 
 function withoutDeletedRows(audit: Audit, deletedPaths: Set<string>): Audit {
@@ -131,6 +148,7 @@ const CONFIRMATION_ALIASES = new Set([
   "confirm",
 ]);
 const STATUS_PATH_MAX_LENGTH = 64;
+const MAX_INTERACTIVE_MESSAGE_LINES = 8;
 
 function statusPath(path: string): string {
   if (path.length <= STATUS_PATH_MAX_LENGTH) return path;
@@ -139,6 +157,13 @@ function statusPath(path: string): string {
 
 function confirmationAccepted(value: string): boolean {
   return CONFIRMATION_ALIASES.has(value.replace(/^\/+/, "").toLowerCase());
+}
+
+function visibleInteractiveMessage(value: string): string {
+  const lines = value.trimEnd().split(/\r?\n/u).filter(Boolean);
+  if (lines.length <= MAX_INTERACTIVE_MESSAGE_LINES) return lines.join("\n");
+  const visibleLines = lines.slice(-MAX_INTERACTIVE_MESSAGE_LINES + 1);
+  return ["… output truncated; use /details, /errors, or --json", ...visibleLines].join("\n");
 }
 
 function errorMessage(error: unknown): string {
@@ -278,14 +303,62 @@ export async function executeDeletion({
       failed += 1;
     }
   }
-  const summary =
-    `✅ Deletion finished: ${removed} deleted · ${kept} kept · ${failed} failed`;
-  report(summary);
+  report("⏳ Git removal commands completed; verifying the dashboard state...");
+
+  let finalAudit = latestAudit;
+  let stateVerified = false;
+  try {
+    onStatus?.("🔄 Refreshing the dashboard to verify the final state...");
+    finalAudit = await collectAudit(
+      { ...args, deepProcessScan: true },
+      errorOutput,
+      auditFn,
+      rootAuditFn,
+      onStatus,
+    );
+    const remainingDeletedPaths = new Set(
+      finalAudit.rows
+        .filter((row) => deletedPaths.has(row.path))
+        .map((row) => row.path),
+    );
+    for (const path of remainingDeletedPaths) {
+      report(
+        `❌ Removal not verified for ${statusPath(path)}: the worktree is still registered.`,
+      );
+      deletedPaths.delete(path);
+      removed -= 1;
+      failed += 1;
+    }
+    const refreshErrorCount = "errors" in finalAudit ? finalAudit.errors.length : 0;
+    const hasRefreshErrors = refreshErrorCount > 0;
+    if (hasRefreshErrors) {
+      report(
+        `⚠️ Dashboard refresh completed with ${refreshErrorCount} scan error(s); state is not fully verified.`,
+      );
+    }
+    stateVerified = remainingDeletedPaths.size === 0 && !hasRefreshErrors;
+    if (stateVerified) {
+      onStatus?.("✅ Dashboard state verified after deletion.");
+    }
+  } catch (error) {
+    report(
+      `⚠️ Dashboard refresh failed after deletion: ${errorMessage(error)}. The result may be stale; run /refresh.`,
+    );
+  }
+  report(
+    deletionResultMessage("Deletion result", {
+      removed,
+      kept,
+      failed,
+      stateVerified,
+    }),
+  );
   return {
-    audit: withoutDeletedRows(latestAudit, deletedPaths),
+    audit: withoutDeletedRows(finalAudit, deletedPaths),
     removed,
     kept,
     failed,
+    stateVerified,
   };
 }
 
@@ -313,6 +386,8 @@ interface InteractiveController {
     cursorPath: string | null;
     pendingDeletion: Set<string> | null;
     status: string;
+    events: string[];
+    updatedAt: string;
     busy: boolean;
   };
   move(direction: "up" | "down"): void;
@@ -337,7 +412,9 @@ function createInteractiveController({
   let cursorPath: string | null =
     navigationRows(currentAudit, filter)[0]?.path ?? null;
   let pendingDeletion: Set<string> | null = null;
-  let status = "";
+  let status = "Ready. Select a row or press Enter for commands.";
+  let events: string[] = [];
+  let updatedAt = new Date().toISOString();
   let busy = false;
   let closed = false;
 
@@ -346,6 +423,7 @@ function createInteractiveController({
   };
   const setStatus = (message: string): void => {
     status = message;
+    events = [...events, message].slice(-8);
     notify();
   };
 
@@ -363,6 +441,8 @@ function createInteractiveController({
       cursorPath,
       pendingDeletion,
       status,
+      events,
+      updatedAt,
       busy,
     }),
     move(direction) {
@@ -407,13 +487,11 @@ function createInteractiveController({
               onStatus: setStatus,
             });
             currentAudit = result.audit;
+            updatedAt = new Date().toISOString();
             normalizeCursor();
-            setStatus(
-              `✅ Finished: ${result.removed} deleted · ${result.kept} kept · ${result.failed} failed`,
-            );
+            setStatus(deletionResultMessage("Finished", result));
           } catch (error) {
             setStatus(`❌ Deletion failed: ${errorMessage(error)}`);
-            throw error;
           } finally {
             busy = false;
             notify();
@@ -451,6 +529,44 @@ function createInteractiveController({
         output.write(`${HELP}\n`);
       } else if (parsed.command === "list" || parsed.command === "show") {
         return { closed, render: true };
+      } else if (parsed.command === "details" || parsed.command === "detail") {
+        const row = navigationRows(currentAudit, filter).find(
+          (candidate) => candidate.path === cursorPath,
+        );
+        if (!row) {
+          setStatus("⚠️ No worktree is focused.");
+        } else {
+          output.write(
+            `${JSON.stringify(
+              {
+                path: row.path,
+                repository: row.repository ?? row.repoRoot ?? null,
+                branch: row.branch,
+                decision: row.decision,
+                activity: row.activity,
+                warnings: row.warnings,
+                dirtyCount: row.dirtyCount,
+                openProcessCount: row.openProcessCount,
+                pullRequest: row.pr,
+                chat: row.chat,
+              },
+              null,
+              2,
+            )}\n`,
+          );
+          setStatus("ℹ️ Focused worktree details printed.");
+        }
+      } else if (parsed.command === "errors") {
+        if (!("errors" in currentAudit) || currentAudit.errors.length === 0) {
+          setStatus("✅ No scan errors.");
+        } else {
+          output.write(
+            `\nScan errors (${currentAudit.errors.length}):\n${currentAudit.errors
+              .map((error) => `- [${error.stage ?? "unknown"}] ${error.path}: ${error.message}`)
+              .join("\n")}\n`,
+          );
+          setStatus(`❌ ${currentAudit.errors.length} scan error(s) printed.`);
+        }
       } else if (parsed.command === "filter") {
         const nextFilter = parsed.argument || DEFAULT_FILTER;
         if (!isFilter(nextFilter)) {
@@ -494,6 +610,11 @@ function createInteractiveController({
             selected.delete(row.path);
           }
         }
+        const deletableCount = selectedRows(currentAudit, selected).length;
+        const selectionIndicator = parsed.command === "select" ? "✅" : "↩️";
+        setStatus(
+          `${selectionIndicator} Selection updated: ${selected.size} row(s), ${deletableCount} deletable.`,
+        );
       } else if (parsed.command === "preview") {
         const chosen = selectedRows(currentAudit, selected);
         if (chosen.length === 0) {
@@ -518,7 +639,8 @@ function createInteractiveController({
           printPreview(output, chosen);
           if (chosen.some((row) => row.warnings.length > 0)) {
             output.write(
-              "Warning: selected worktree(s) have local risk warnings. Forced removal will be used after confirmation.\n",
+              "Warning: selected worktree(s) have local risk warnings. " +
+                "Forced removal will be used after confirmation.\n",
             );
           }
           output.write(
@@ -542,6 +664,7 @@ function createInteractiveController({
             rootAuditFn,
             setStatus,
           );
+          updatedAt = new Date().toISOString();
           selected = new Set();
           normalizeCursor();
           setStatus(
@@ -549,7 +672,6 @@ function createInteractiveController({
           );
         } catch (error) {
           setStatus(`❌ Refresh failed: ${errorMessage(error)}`);
-          throw error;
         } finally {
           busy = false;
           notify();
@@ -583,7 +705,15 @@ function canUseRawInteractiveSession(
 function renderSession(
   controller: InteractiveController,
   output: CliOutput,
-  additionalLines = 0,
+  {
+    additionalLines = 0,
+    mode = "navigate",
+    commandBuffer = "",
+  }: {
+    additionalLines?: number;
+    mode?: InputMode;
+    commandBuffer?: string;
+  } = {},
 ): string {
   const state = controller.getState();
   return renderInteractive(state.audit, {
@@ -591,6 +721,11 @@ function renderSession(
     filter: state.filter,
     cursorPath: state.cursorPath,
     status: state.status,
+    events: state.events,
+    updatedAt: state.updatedAt,
+    busy: state.busy,
+    mode,
+    commandBuffer,
     columns: output.columns,
     rows: output.rows ?? (output.isTTY ? DEFAULT_TERMINAL_ROWS : undefined),
     additionalLines,
@@ -623,8 +758,13 @@ async function runLineInteractiveSession(
     input: input as NodeJS.ReadableStream,
     output: output as NodeJS.WritableStream,
     terminal: Boolean(input.isTTY && output.isTTY),
-    prompt: PROMPT,
+    prompt: COMMAND_PROMPT,
   });
+  const updatePrompt = (): void => {
+    readline.setPrompt(
+      controller.getState().pendingDeletion ? CONFIRM_PROMPT : COMMAND_PROMPT,
+    );
+  };
 
   show();
   readline.prompt();
@@ -643,8 +783,10 @@ async function runLineInteractiveSession(
           return;
         }
         if (result.render) show();
+        updatePrompt();
       } catch (error) {
-        output.write(`Error: ${errorMessage(error)}\n`);
+        output.write(`❌ ${errorMessage(error)}\n`);
+        updatePrompt();
       } finally {
         if (!closed) {
           readline.resume();
@@ -658,6 +800,13 @@ async function runLineInteractiveSession(
 const ANSI_CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const ANSI_HIDE_CURSOR = "\u001b[?25l";
 const ANSI_SHOW_CURSOR = "\u001b[?25h";
+
+function promptForMode(state: ReturnType<InteractiveController["getState"]>, mode: InputMode): string {
+  if (state.busy) return "working> ";
+  if (state.pendingDeletion || mode === "confirm") return CONFIRM_PROMPT;
+  if (mode === "command") return COMMAND_PROMPT;
+  return "navigate> ";
+}
 
 async function runRawInteractiveSession(
   options: InteractiveSessionOptions & { input: RawCliInput },
@@ -682,23 +831,28 @@ async function runRawInteractiveSession(
     onUpdate: () => requestRender(),
   });
   let pendingEscape = "";
+  let inputMode: InputMode = "navigate";
   let commandBuffer = "";
+  let commandCursor = 0;
+  let commandHistory: string[] = [];
+  let historyCursor: number | null = null;
   let closed = false;
   let keyQueue = Promise.resolve();
   let resolveSession: ((code: number) => void) | null = null;
 
   const render = (): void => {
     const state = controller.getState();
-    const prompt = state.busy
-      ? "working> "
-      : state.pendingDeletion
-        ? "confirm> "
-        : PROMPT;
-    const message = lastMessage.trimEnd();
+    const effectiveMode: InputMode = state.pendingDeletion ? "confirm" : inputMode;
+    const prompt = promptForMode(state, effectiveMode);
+    const message = visibleInteractiveMessage(lastMessage);
     const messageLines = message.length > 0 ? message.split(/\r?\n/u).length : 0;
     const messageBlock = message.length > 0 ? `\n${message}` : "";
     output.write(
-      `${ANSI_CLEAR_SCREEN}${ANSI_HIDE_CURSOR}${renderSession(controller, output, messageLines)}${messageBlock}\n\n${prompt}${commandBuffer}`,
+      `${ANSI_CLEAR_SCREEN}${ANSI_HIDE_CURSOR}${renderSession(controller, output, {
+        additionalLines: messageLines,
+        mode: effectiveMode,
+        commandBuffer,
+      })}${messageBlock}\n\n${prompt}${commandBuffer}`,
     );
   };
   requestRender = render;
@@ -715,52 +869,143 @@ async function runRawInteractiveSession(
   const submit = async (): Promise<void> => {
     const value = commandBuffer.trim();
     if (!value) {
+      if (inputMode === "navigate") inputMode = "command";
+      historyCursor = null;
       render();
       return;
     }
+    if (inputMode === "command") {
+      commandHistory = [...commandHistory.filter((entry) => entry !== value), value].slice(-20);
+    }
     lastMessage = "";
     commandBuffer = "";
+    commandCursor = 0;
+    historyCursor = null;
     const result = await controller.submit(value);
     if (result.closed) {
       finish();
       return;
     }
+    inputMode = controller.getState().pendingDeletion ? "confirm" : "navigate";
     render();
+  };
+  const setCommandBuffer = (value: string): void => {
+    commandBuffer = value;
+    commandCursor = value.length;
+  };
+  const navigateHistory = (direction: "up" | "down"): void => {
+    if (commandHistory.length === 0) return;
+    const current = historyCursor ?? commandHistory.length;
+    const next = direction === "up"
+      ? Math.max(0, current - 1)
+      : Math.min(commandHistory.length, current + 1);
+    historyCursor = next;
+    setCommandBuffer(commandHistory[next] ?? "");
   };
   const handleKey = async (key: TerminalKey): Promise<void> => {
     if (closed) return;
-    if (controller.getState().busy) return;
     if (key.kind === "interrupt") {
+      if (controller.getState().busy) {
+        lastMessage = "⏳ An operation is still running. Wait for its final state before quitting.\n";
+        render();
+        return;
+      }
       finish();
-    } else if (key.kind === "up" || key.kind === "down") {
-      commandBuffer = "";
+      return;
+    }
+    if (key.kind === "redraw") {
+      render();
+      return;
+    }
+    if (controller.getState().busy) {
+      return;
+    }
+    if (inputMode === "confirm") {
+      if (key.kind === "escape") {
+        await controller.submit("/cancel");
+        inputMode = "navigate";
+        commandBuffer = "";
+        commandCursor = 0;
+        render();
+      } else if (key.kind === "backspace") {
+        commandBuffer = Array.from(commandBuffer).slice(0, -1).join("");
+        commandCursor = commandBuffer.length;
+        render();
+      } else if (key.kind === "space") {
+        commandBuffer += " ";
+        commandCursor = commandBuffer.length;
+        render();
+      } else if (key.kind === "enter") {
+        await submit();
+      } else if (key.kind === "character") {
+        commandBuffer += key.value;
+        commandCursor = commandBuffer.length;
+        render();
+      }
+      return;
+    }
+    if (inputMode === "command") {
+      if (key.kind === "up" || key.kind === "down") {
+        navigateHistory(key.kind);
+        render();
+      } else if (key.kind === "left") {
+        commandCursor = Math.max(0, commandCursor - 1);
+        render();
+      } else if (key.kind === "right") {
+        commandCursor = Math.min(commandBuffer.length, commandCursor + 1);
+        render();
+      } else if (key.kind === "backspace") {
+        if (commandCursor > 0) {
+          const characters = Array.from(commandBuffer);
+          characters.splice(commandCursor - 1, 1);
+          commandBuffer = characters.join("");
+          commandCursor -= 1;
+        }
+        render();
+      } else if (key.kind === "escape") {
+        inputMode = "navigate";
+        commandBuffer = "";
+        commandCursor = 0;
+        historyCursor = null;
+        render();
+      } else if (key.kind === "space") {
+        commandBuffer = `${commandBuffer.slice(0, commandCursor)} ${commandBuffer.slice(commandCursor)}`;
+        commandCursor += 1;
+        render();
+      } else if (key.kind === "enter") {
+        await submit();
+      } else if (key.kind === "character") {
+        commandBuffer = `${commandBuffer.slice(0, commandCursor)}${key.value}${commandBuffer.slice(commandCursor)}`;
+        commandCursor += key.value.length;
+        render();
+      }
+      return;
+    }
+    if (key.kind === "up" || key.kind === "down") {
       controller.move(key.kind);
       render();
-    } else if (key.kind === "space" && commandBuffer.length === 0) {
+    } else if (key.kind === "space") {
       lastMessage = "";
       controller.toggleSelection();
       render();
-    } else if (key.kind === "space") {
-      commandBuffer += " ";
-      render();
-    } else if (key.kind === "backspace") {
-      commandBuffer = Array.from(commandBuffer).slice(0, -1).join("");
-      render();
-    } else if (key.kind === "escape") {
-      commandBuffer = "";
-      render();
     } else if (key.kind === "enter") {
-      await submit();
+      inputMode = "command";
+      commandBuffer = "";
+      commandCursor = 0;
+      historyCursor = null;
+      render();
     } else if (key.kind === "character") {
-      if (commandBuffer.length === 0 && key.value.toLowerCase() === "q") {
+      if (key.value.toLowerCase() === "q") {
         await controller.submit("/quit");
         finish();
-      } else if (commandBuffer.length === 0 && key.value === "?") {
+      } else if (key.value === "?") {
         lastMessage = "";
         await controller.submit("/help");
         render();
       } else {
-        commandBuffer += key.value;
+        inputMode = "command";
+        commandBuffer = key.value;
+        commandCursor = key.value.length;
         render();
       }
     }
